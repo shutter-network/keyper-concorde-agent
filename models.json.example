@@ -1,0 +1,17 @@
+{
+  "providers": {
+    "local": {
+      "baseUrl": "https://YOUR_ENDPOINT/v1",
+      "apiKey": "$LOCAL_API_KEY",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "YOUR_MODEL_ID",
+          "name": "Your model",
+          "contextWindow": 32768,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}

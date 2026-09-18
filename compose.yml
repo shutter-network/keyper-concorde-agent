@@ -1,0 +1,104 @@
+name: keyper-concorde-agent
+
+x-database-url: &database-url postgres://concorde:concorde@postgres:5432/concorde
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Provider keys are optional here; main.ts forwards whichever are set.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LOCAL_API_KEY: ${LOCAL_API_KEY:-}
+      # The Telegram Channel's bot, and the tester's chat, attached to the seeded user at boot.
+      TG_TOKEN: ${TG_TOKEN:?copy .env.example to .env and put the bot token in it}
+      TG_CHAT: ${TG_CHAT:-}
+      DATABASE_URL: *database-url
+      USER_PASSWORD: ${USER_PASSWORD:?copy .env.example to .env}
+      PUBLIC_HOST: 0.0.0.0
+      PUBLIC_PORT: "8081"
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "7411"
+      AGENT_SERVER_URL: http://gateway:7411
+      AGENT_IMAGE: keyper-concorde-agent:0.83.0
+      AGENT_NETWORK: keyper_agent_agent
+      RUNTIME_DIR_HOST: ${PWD}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./state/workspace:/app/state/workspace
+      - ./state/agent:/app/state/agent
+    ports:
+      - "127.0.0.1:8081:8081"
+    networks: [db, agent, public]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      agent-image:
+        condition: service_completed_successfully
+    stop_grace_period: 300s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["npx", "drizzle-kit", "push", "--force"]
+    environment:
+      DATABASE_URL: *database-url
+    restart: "no"
+    networks: [db]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: concorde
+      POSTGRES_PASSWORD: concorde
+      POSTGRES_DB: concorde
+    volumes:
+      - db:/var/lib/postgresql/data
+    networks: [db]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "concorde", "-d", "concorde"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  agent-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: keyper-concorde-agent:0.83.0
+    command: ["--version"]
+    restart: "no"
+    networks: [agent]
+
+  # The Channel's tests, against this stack's PostgreSQL. Each test file creates and drops its
+  # own database there. `docker compose run --rm test`.
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: [test]
+    command: ["npm", "test"]
+    environment:
+      DATABASE_URL: *database-url
+    networks: [db]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  db:
+    name: keyper_agent_db
+  agent:
+    name: keyper_agent_agent
+  public:
+    name: keyper_agent_public
+
+volumes:
+  db:

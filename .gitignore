@@ -1,0 +1,9 @@
+.env
+state/
+node_modules/
+.idea/
+# Per-machine pi configuration; copy the .example files and fill them in.
+models.json
+settings.json
+# The framework tarball is a local install aid until the package is on npm. Never committed.
+vendor/*.tgz

@@ -1,0 +1,4 @@
+{
+  "defaultModel": "YOUR_MODEL_ID",
+  "defaultProvider": "local"
+}
