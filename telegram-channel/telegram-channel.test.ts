@@ -353,3 +353,64 @@ describe("polling", () => {
     }
   });
 });
+
+describe("inbound resilience", () => {
+  // `admit` advances the poll offset only after it succeeds. If its transaction fails on a Db
+  // blip, the offset must stay put so Telegram redelivers the update and `received` de-duplicates
+  // it. With the offset advanced first, the failed update would be acknowledged and lost.
+  it("a Db failure during admit does not lose the update: it is redelivered and stored once", async () => {
+    const api = await startFakeBotApi();
+
+    // Fail the first admit transaction, then behave normally. Only `tx` is intercepted; `handle`
+    // and `listen` delegate to the real Db, so the chat lookup and outbox still work.
+    let failsLeft = 1;
+    const flakyTx: typeof db.tx = (body) => {
+      if (failsLeft > 0) {
+        failsLeft -= 1;
+        return Promise.reject(new Error("injected db blip"));
+      }
+      return db.tx(body);
+    };
+    const flakyDb: Db = new Proxy(db, {
+      get: (target, prop, receiver) =>
+        prop === "tx" ? flakyTx : Reflect.get(target, prop, receiver),
+    });
+
+    const messenger = createMessenger({
+      db,
+      users,
+      worker,
+      agentServer: serverComponent(Fastify(), nowhere),
+    });
+    const channel = createTelegramChannel({
+      db: flakyDb,
+      messenger,
+      token,
+      apiBaseUrl: api.url,
+      logger: silent,
+      pollTimeoutSeconds: 1,
+      retryDelayMs: 50,
+    });
+
+    const chatId = newChatId();
+    const userId = await db.tx(async (tx) => {
+      const user = await users.create(tx);
+      await channel.recordChat(tx, user.id, chatId);
+      return user.id;
+    });
+
+    await channel.start();
+    try {
+      api.push(textUpdate(chatId, "survives a db blip"));
+      await waitUntil("the Message is stored after redelivery", async () => {
+        return (await messenger.history(userId)).some((m) => m.text === "survives a db blip");
+      });
+      assert.equal(failsLeft, 0); // the injected failure really fired
+      const matches = (await messenger.history(userId)).filter((m) => m.text === "survives a db blip");
+      assert.equal(matches.length, 1); // redelivered, but de-duplicated: stored exactly once
+    } finally {
+      await channel.stop();
+      await api.stop();
+    }
+  });
+});
