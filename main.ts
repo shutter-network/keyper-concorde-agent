@@ -12,6 +12,7 @@ import {
   templateHandler,
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
+import { sql } from "drizzle-orm";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
 
 const password = process.env.USER_PASSWORD!;
@@ -56,6 +57,25 @@ const gateway = createGateway({
     const messenger = createMessenger({ db, users, worker, agentServer });
     // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
     const telegram = createTelegramChannel({ db, messenger, token: process.env.TG_TOKEN! });
+
+    publicServer.fastify.get("/health", async (_request, reply) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          db.handle({}).execute(sql`select 1`),
+          new Promise((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error("database check timed out")), 3000);
+          }),
+        ]);
+        return { status: "ok" };
+      } catch (error) {
+        reply.code(503);
+        return { status: "unhealthy", detail: String(error) };
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    });
+
     return { users, passwordAuth, messenger, telegram };
   },
   handlers: ({ db, messenger }) => ({
