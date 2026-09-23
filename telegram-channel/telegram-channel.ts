@@ -23,6 +23,7 @@ import {
   queueText,
   recordRefusal,
   selectUnsent,
+  setSentParts,
   UnrecordedChatError,
 } from "./outbound.ts";
 import { received, telegramChannelTables } from "./schema/index.ts";
@@ -140,7 +141,10 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
   // True when the drain may continue to the next row.
   async function deliver(row: OutboxRow, signal: AbortSignal): Promise<boolean> {
     try {
-      await api.sendMessage(row.chatId, row.text, signal);
+      await api.sendMessage(row.chatId, row.text, signal, {
+        fromChunk: row.sentParts,
+        onChunkSent: (sentParts) => setSentParts(handle, row.messageId, sentParts),
+      });
     } catch (error) {
       if (signal.aborted) return false;
       if (error instanceof TelegramApiError && error.permanent) {
