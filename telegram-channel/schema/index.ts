@@ -43,11 +43,15 @@ export const outbox = telegramChannelSchema.table("outbox", {
 
 // What Telegram said about the message that became one inbound Message: its sender, chat and
 // message id. Written in the Message's own transaction; a null sender is Telegram naming nobody.
+// The chat type is kept because a room's User is the room: it is what tells a later reader that
+// the Message is one of several people's rather than its User's own.
 export const senders = telegramChannelSchema.table("senders", {
   messageId: uuid("message_id").primaryKey(),
   senderId: text("sender_id"),
   username: text("username"),
+  firstName: text("first_name"),
   chatId: text("chat_id").notNull(),
+  chatType: text("chat_type").notNull(),
   telegramMessageId: text("telegram_message_id").notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true })
     .notNull()

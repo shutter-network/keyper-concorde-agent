@@ -12,9 +12,8 @@ import {
   templateHandler,
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
+import { promptData } from "./prompt.ts";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
-
-const password = process.env.USER_PASSWORD!;
 
 const tokenTtl = 30 * 24 * 60 * 60 * 1000;
 
@@ -55,19 +54,31 @@ const gateway = createGateway({
     const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
     const messenger = createMessenger({ db, users, worker, agentServer });
     // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
-    const telegram = createTelegramChannel({ db, messenger, token: process.env.TG_TOKEN! });
+    // Groups only. Every User here is a room bound to one keyper, so a 1:1 chat has no keyper to
+    // answer about and is refused before it becomes a Message.
+    const telegram = createTelegramChannel({
+      db,
+      messenger,
+      token: process.env.TG_TOKEN!,
+      chatMode: "group",
+    });
     return { users, passwordAuth, messenger, telegram };
   },
-  handlers: ({ db, messenger }) => ({
+  handlers: ({ db, messenger, telegram, users }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived for you from user {{userId}}. They said:
+        template: `A message arrived from the group for keyper {{keyper}}.{{#if writer}} It was written by {{writer}}, {{role}}.{{/if}} They said:
 
 {{text}}
 
-Answer them by sending them a Message. Your final reply here reaches nobody.`,
+Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`,
         session: (signal) => `user_${signal.payload.userId}`,
-        data: (signal) => signal.payload,
+        // The reads, so that assembling the values stays pure and testable in prompt.ts.
+        data: async (signal) => {
+          const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
+          const user = await users.get(signal.payload.userId);
+          return promptData(signal.payload, sender, user?.attributes);
+        },
       }),
       // The template handler has no failure path. Without this, a failed run is a log line
       // and the sender hears nothing.
@@ -87,30 +98,23 @@ Answer them by sending them a Message. Your final reply here reaches nobody.`,
 
 await gateway.start();
 
-const { db, users, passwordAuth, telegram } = gateway.components;
-
-if ((await users.list({ limit: 1 })).length === 0) {
-  await db.tx(async (tx) => {
-    const user = await users.create(tx);
-    await users.setAttributes(tx, user.id, { name: "the one person here" });
-    await passwordAuth.setPassword(tx, user.id, password);
-  });
+// Nothing is seeded. A User here is a group bound to a keyper, and one with neither chat nor keyper
+// could receive nothing and answer about nothing. `admin.ts add` is the only place a group is made,
+// and the only place a chat and its keyper are recorded together.
+//
+// Password Auth is still built, so the Public server's User routes keep the hook that refuses them.
+// Nobody holds a password, so nobody logs in, which is what a deployment reached only over Telegram
+// wants.
+//
+// One line at boot, because the framework says nothing until something happens, and a silent log
+// otherwise reads the same whether the gateway is idle or never came up.
+const groups = await gateway.components.users.list();
+console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
+for (const group of groups) {
+  const { name, keyper } = (group.attributes ?? {}) as { name?: string; keyper?: string };
+  console.log(`  ${name ?? "(unnamed)"} covers keyper ${keyper ?? "(none bound)"}`);
 }
-
-for (const user of await users.list()) {
-  console.log(`user ${user.id} logs in with the password ${password}`);
-}
-
-// Attach the tester's chat to the seeded user, once. Later users get their chats recorded by
-// hand from the id the Channel tells an unknown chat.
-const testerChat = process.env.TG_CHAT;
-if (testerChat) {
-  const [first] = await users.list({ limit: 1 });
-  if (first !== undefined && (await db.tx((tx) => telegram.chatOf(tx, first.id))) === undefined) {
-    await db.tx((tx) => telegram.recordChat(tx, first.id, testerChat));
-    console.log(`telegram chat ${testerChat} now belongs to user ${first.id}`);
-  }
-}
+if (groups.length === 0) console.log("  none registered yet; see admin.ts add");
 
 for (const stopping of ["SIGINT", "SIGTERM"] as const) {
   process.once(stopping, () => void gateway.stop());

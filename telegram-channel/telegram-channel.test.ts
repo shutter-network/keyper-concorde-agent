@@ -17,7 +17,11 @@ import { UnrecordedChatError } from "./outbound.ts";
 import * as telegramChannelSchema from "./schema/index.ts";
 import { outbox, senders, telegramChannelTables } from "./schema/index.ts";
 import type { TelegramUpdate } from "./telegram-api.ts";
-import { createTelegramChannel, type TelegramChannel } from "./telegram-channel.ts";
+import {
+  createTelegramChannel,
+  type TelegramChannel,
+  type TelegramChatMode,
+} from "./telegram-channel.ts";
 import {
   applySchema,
   createTestDatabase,
@@ -39,9 +43,14 @@ let worker: ReturnType<typeof createSignalWorker>;
 let nextChat = 1000;
 let nextUpdate = 1;
 const newChatId = (): string => String(nextChat++);
-const textUpdate = (chatId: string, text: string, id: number = nextUpdate++): TelegramUpdate => ({
+const textUpdate = (
+  chatId: string,
+  text: string,
+  id: number = nextUpdate++,
+  chatType = "private",
+): TelegramUpdate => ({
   update_id: id,
-  message: { message_id: id, text, chat: { id: Number(chatId), type: "private" } },
+  message: { message_id: id, text, chat: { id: Number(chatId), type: chatType } },
 });
 
 before(async () => {
@@ -61,7 +70,7 @@ type Deployment = {
   readonly channel: TelegramChannel;
 };
 
-function deploymentFor(api: FakeBotApi, retryDelayMs = 50): Deployment {
+function deploymentFor(api: FakeBotApi, retryDelayMs = 50, chatMode?: TelegramChatMode): Deployment {
   const messenger = createMessenger({
     db,
     users,
@@ -76,17 +85,22 @@ function deploymentFor(api: FakeBotApi, retryDelayMs = 50): Deployment {
     logger: silent,
     pollTimeoutSeconds: 1,
     retryDelayMs,
+    ...(chatMode === undefined ? {} : { chatMode }),
   });
   return { api, messenger, channel };
 }
 
 async function withDeployment(
   body: (deployment: Deployment) => Promise<void>,
-  options: { readonly retryDelayMs?: number; readonly beforeStart?: (api: FakeBotApi) => void } = {},
+  options: {
+    readonly retryDelayMs?: number;
+    readonly beforeStart?: (api: FakeBotApi) => void;
+    readonly chatMode?: TelegramChatMode;
+  } = {},
 ): Promise<void> {
   const api = await startFakeBotApi();
   options.beforeStart?.(api);
-  const deployment = deploymentFor(api, options.retryDelayMs);
+  const deployment = deploymentFor(api, options.retryDelayMs, options.chatMode);
   await deployment.channel.start();
   try {
     await body(deployment);
@@ -217,6 +231,40 @@ describe("inbound", () => {
     });
   });
 
+  // The only place either id is told to anybody: nothing is written for an unknown chat, so the
+  // sender who writes first is never recorded and this reply is the whole of the enrolment path.
+  it("an unknown chat is told the sender id as well as its own", async () => {
+    await withDeployment(async ({ api }) => {
+      const strangerChat = newChatId();
+      const id = nextUpdate++;
+      api.push({
+        update_id: id,
+        message: {
+          message_id: id,
+          text: "let me in",
+          chat: { id: Number(strangerChat), type: "supergroup" },
+          from: { id: 874974777, username: "alice" },
+        },
+      });
+      await waitUntil("the stranger got an answer", () => sentTo(api, strangerChat).length === 1);
+      const [answer] = sentTo(api, strangerChat);
+      // Anchored on the sentence, because a bare id matches digits inside the other one.
+      assert.match(answer.text, new RegExp(`Its id is ${strangerChat}\\.`));
+      assert.match(answer.text, /You are 874974777\./);
+    });
+  });
+
+  it("an unknown chat Telegram named no sender for is told only its own id", async () => {
+    await withDeployment(async ({ api }) => {
+      const strangerChat = newChatId();
+      api.push(textUpdate(strangerChat, "posted by a channel", nextUpdate++, "channel"));
+      await waitUntil("the stranger got an answer", () => sentTo(api, strangerChat).length === 1);
+      const [answer] = sentTo(api, strangerChat);
+      assert.match(answer.text, new RegExp(strangerChat));
+      assert.doesNotMatch(answer.text, /You are/);
+    });
+  });
+
   it("an update without text is ignored", async () => {
     await withDeployment(async ({ api, messenger, channel }) => {
       const { userId, chatId } = await admit(channel);
@@ -239,18 +287,21 @@ describe("sender metadata", () => {
   // reading `update_id` where `message_id` belongs would otherwise pass unnoticed.
   let nextTelegramMessage = 900000;
 
+  // Rooms, because that is every chat this deployment serves. A private chat would also record a
+  // sender, but Telegram always names one there, so it cannot produce the third case below.
   const updateFrom = (
     chatId: string,
     text: string,
-    from: { id: number; username?: string } | undefined,
+    from: { id: number; username?: string; first_name?: string } | undefined,
     id: number = nextUpdate++,
     messageId: number = nextTelegramMessage++,
+    chatType = "supergroup",
   ): TelegramUpdate => ({
     update_id: id,
     message: {
       message_id: messageId,
       text,
-      chat: { id: Number(chatId), type: "private" },
+      chat: { id: Number(chatId), type: chatType },
       ...(from === undefined ? {} : { from }),
     },
   });
@@ -260,13 +311,19 @@ describe("sender metadata", () => {
       const { userId, chatId } = await admit(channel);
       const id = nextUpdate++;
       const messageId = nextTelegramMessage++;
-      api.push(updateFrom(chatId, "from a named sender", { id: 4242, username: "alice" }, id, messageId));
+      // Telegram sends a first name whether or not there is a username, so the real payload carries
+      // both and storing only one of them would go unnoticed against a fixture that carried one.
+      api.push(
+        updateFrom(chatId, "from a named sender", { id: 4242, username: "alice", first_name: "Alice" }, id, messageId),
+      );
       await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
       const [message] = await messenger.history(userId);
       assert.deepEqual(await db.tx((tx) => channel.senderOf(tx, message.id)), {
         senderId: "4242",
         username: "alice",
+        firstName: "Alice",
         chatId,
+        chatType: "supergroup",
         telegramMessageId: String(messageId),
       });
       assert.equal(message.text, "from a named sender"); // the text itself is untouched
@@ -278,13 +335,15 @@ describe("sender metadata", () => {
       const { userId, chatId } = await admit(channel);
       const id = nextUpdate++;
       const messageId = nextTelegramMessage++;
-      api.push(updateFrom(chatId, "from an unnamed sender", { id: 777 }, id, messageId));
+      api.push(updateFrom(chatId, "from an unnamed sender", { id: 777, first_name: "Mini" }, id, messageId));
       await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
       const [message] = await messenger.history(userId);
       assert.deepEqual(await db.tx((tx) => channel.senderOf(tx, message.id)), {
         senderId: "777",
         username: null,
+        firstName: "Mini",
         chatId,
+        chatType: "supergroup",
         telegramMessageId: String(messageId),
       });
     });
@@ -295,15 +354,18 @@ describe("sender metadata", () => {
       const { userId, chatId } = await admit(channel);
       const id = nextUpdate++;
       const messageId = nextTelegramMessage++;
-      // A channel post or an anonymous group admin carries no `from`. The row is still written, so
-      // "recorded, sender unknown" stays distinguishable from "nothing recorded".
-      api.push(updateFrom(chatId, "from nobody in particular", undefined, id, messageId));
+      // Telegram omits `from` on a channel post and for an anonymous group admin, and nowhere else:
+      // a private chat always names its sender. The row is still written, so "recorded, sender
+      // unknown" stays distinguishable from "nothing recorded".
+      api.push(updateFrom(chatId, "from nobody in particular", undefined, id, messageId, "channel"));
       await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
       const [message] = await messenger.history(userId);
       assert.deepEqual(await db.tx((tx) => channel.senderOf(tx, message.id)), {
         senderId: null,
         username: null,
+        firstName: null,
         chatId,
+        chatType: "channel",
         telegramMessageId: String(messageId),
       });
     });
@@ -334,6 +396,87 @@ describe("sender metadata", () => {
       );
       assert.equal((await senderRows(message.id)).length, 1); // and no second metadata row
     });
+  });
+});
+
+describe("chat modes", () => {
+  it("a room is refused where only private chats are served", async () => {
+    await withDeployment(
+      async ({ api, messenger, channel }) => {
+        const { userId, chatId } = await admit(channel);
+        api.push(textUpdate(chatId, "from a room", nextUpdate++, "supergroup"));
+        await waitUntil("the room was answered", () => sentTo(api, chatId).length === 1);
+        assert.match(sentTo(api, chatId)[0].text, /direct messages only/);
+        assert.equal((await messenger.history(userId)).length, 0);
+      },
+      { chatMode: "private" },
+    );
+  });
+
+  it("a private chat is refused where only rooms are served", async () => {
+    await withDeployment(
+      async ({ api, messenger, channel }) => {
+        const { userId, chatId } = await admit(channel);
+        api.push(textUpdate(chatId, "from one person"));
+        await waitUntil("the person was answered", () => sentTo(api, chatId).length === 1);
+        assert.match(sentTo(api, chatId)[0].text, /group chats only/);
+        assert.equal((await messenger.history(userId)).length, 0);
+      },
+      { chatMode: "group" },
+    );
+  });
+
+  // The refusal has to come before the chat is looked up, or a kind that can never be served is
+  // still handed the id it would be enrolled with.
+  it("a chat of an unserved kind is never told its own id", async () => {
+    await withDeployment(
+      async ({ api }) => {
+        const strangerChat = newChatId();
+        api.push(textUpdate(strangerChat, "let me in", nextUpdate++, "group"));
+        await waitUntil("the stranger was answered", () => sentTo(api, strangerChat).length === 1);
+        const [answer] = sentTo(api, strangerChat);
+        assert.match(answer.text, /direct messages only/);
+        assert.doesNotMatch(answer.text, new RegExp(strangerChat));
+      },
+      { chatMode: "private" },
+    );
+  });
+
+  it("both kinds become Messages where nothing is excluded", async () => {
+    await withDeployment(
+      async ({ api, messenger, channel }) => {
+        const room = await admit(channel);
+        const person = await admit(channel);
+        api.push(textUpdate(room.chatId, "from the room", nextUpdate++, "supergroup"));
+        api.push(textUpdate(person.chatId, "from the person", nextUpdate++));
+        await waitUntil("both arrived", async () => {
+          const [a, b] = await Promise.all([
+            messenger.history(room.userId),
+            messenger.history(person.userId),
+          ]);
+          return a.length === 1 && b.length === 1;
+        });
+      },
+      { chatMode: "both" },
+    );
+  });
+
+  // Telegram upgrades a busy group to a supergroup on its own, so serving one and not the other
+  // would break a room without anybody changing anything.
+  it("a supergroup is served as a room, and its kind is recorded", async () => {
+    await withDeployment(
+      async ({ api, messenger, channel }) => {
+        const { userId, chatId } = await admit(channel);
+        api.push(textUpdate(chatId, "from a supergroup", nextUpdate++, "supergroup"));
+        await waitUntil("the Message arrived", async () => {
+          return (await messenger.history(userId)).length === 1;
+        });
+        const [message] = await messenger.history(userId);
+        const sender = await db.tx((tx) => channel.senderOf(tx, message.id));
+        assert.equal(sender?.chatType, "supergroup");
+      },
+      { chatMode: "group" },
+    );
   });
 });
 

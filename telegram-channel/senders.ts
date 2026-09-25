@@ -5,7 +5,9 @@ import { senders } from "./schema/index.ts";
 export type TelegramSender = {
   readonly senderId: string | null;
   readonly username: string | null;
+  readonly firstName: string | null;
   readonly chatId: string;
+  readonly chatType: string;
   readonly telegramMessageId: string;
 };
 
@@ -27,7 +29,9 @@ export async function selectSenderFor<TSchema extends Record<string, unknown>>(
     .select({
       senderId: senders.senderId,
       username: senders.username,
+      firstName: senders.firstName,
       chatId: senders.chatId,
+      chatType: senders.chatType,
       telegramMessageId: senders.telegramMessageId,
     })
     .from(senders)

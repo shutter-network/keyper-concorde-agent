@@ -6,7 +6,13 @@ export type TelegramUpdate = {
     readonly message_id: number;
     readonly text?: string;
     readonly chat: { readonly id: number; readonly type: string };
-    readonly from?: { readonly id: number; readonly username?: string };
+    // Telegram requires `first_name` of a user and not `username`, so it is the name most people
+    // can be called by. Optional here all the same: nothing validates the cast below.
+    readonly from?: {
+      readonly id: number;
+      readonly username?: string;
+      readonly first_name?: string;
+    };
   };
 };
 

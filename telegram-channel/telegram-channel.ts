@@ -2,8 +2,9 @@
 //
 // Inbound: one long poll on getUpdates. A text from a chat some User holds becomes that User's
 // Message, inside one transaction with the update id, so a redelivery is dropped. A text from a
-// chat nobody holds is answered once with its own chat id, outside the log, which is how an
-// operator learns the id to hand the team.
+// chat nobody holds is answered once with its own chat id and the sender id of whoever wrote,
+// outside the log, which is how those ids reach whoever registers the chat. A chat of a kind
+// `chatMode` excludes is answered once too, and is never told either.
 //
 // Outbound: `send` writes an outbox row inside the Messenger's transaction and rings a NOTIFY.
 // The drain then calls sendMessage after the commit, deletes the row on success, keeps it with a
@@ -31,6 +32,13 @@ import { createTelegramApi, TelegramApiError, type TelegramUpdate } from "./tele
 
 const channelName = "telegram";
 
+export type TelegramChatMode = "private" | "group" | "both";
+
+function serves(mode: TelegramChatMode, chatType: string): boolean {
+  if (mode === "both") return true;
+  return mode === "private" ? chatType === "private" : chatType !== "private";
+}
+
 export type TelegramChannelOptions = {
   readonly db: Db;
   readonly messenger: Messenger;
@@ -41,6 +49,8 @@ export type TelegramChannelOptions = {
   readonly pollTimeoutSeconds?: number;
   /** Pause after a failed poll before the next one. Default 5000. */
   readonly retryDelayMs?: number;
+  /** Which kinds of chat become Messages. Default "both", which restricts nothing. */
+  readonly chatMode?: TelegramChatMode;
   /** For tests against a fake Bot API. */
   readonly apiBaseUrl?: string;
 };
@@ -75,12 +85,23 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
   const api = createTelegramApi(options.token, options.apiBaseUrl);
   const pollTimeout = options.pollTimeoutSeconds ?? 25;
   const retryDelay = options.retryDelayMs ?? 5000;
+  const chatMode = options.chatMode ?? "both";
 
   let running: AbortController | undefined;
   let polling: Promise<void> = Promise.resolve();
   let listening: Listening | undefined;
   let draining: Promise<void> = Promise.resolve();
   let ticker: ReturnType<typeof setInterval> | undefined;
+
+  // A reply to a chat that has no Message to carry it, and so no outbox row either. It is told
+  // once per message it sends, because nothing here remembers a chat it refused.
+  async function tell(chatId: string, text: string, signal: AbortSignal): Promise<void> {
+    try {
+      await api.sendMessage(chatId, text, signal);
+    } catch (error) {
+      if (!signal.aborted) log.warn({ err: error, chatId }, "a reply outside the log failed");
+    }
+  }
 
   async function admit(update: TelegramUpdate, signal: AbortSignal): Promise<void> {
     const message = update.message;
@@ -89,21 +110,28 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
     if (message === undefined || text === undefined) return;
 
     const chatId = String(message.chat.id);
+    const chatType = message.chat.type;
+    // Ahead of the lookup, so a kind this deployment does not serve is never told its own id and
+    // invited into an enrolment that would be refused here anyway.
+    if (!serves(chatMode, chatType)) {
+      log.info(
+        { chatId, chatType, update: update.update_id },
+        "a Telegram message came from a kind of chat this deployment does not serve, and was dropped",
+      );
+      await tell(chatId, refusal(chatMode), signal);
+      return;
+    }
+
     const userId = await selectUserFor(handle, chatId);
     if (userId === undefined) {
       log.info(
         { chatId, update: update.update_id },
         "a Telegram message came from a chat no User holds, and was dropped",
       );
-      try {
-        await api.sendMessage(
-          chatId,
-          `This chat is not registered with the agent. Its id is ${chatId}.`,
-          signal,
-        );
-      } catch (error) {
-        if (!signal.aborted) log.warn({ err: error, chatId }, "the reply to an unknown chat failed");
-      }
+      // Both ids, because registering the chat wants one and naming a person wants the other, and
+      // this reply is the only place either is told to anybody.
+      const who = message.from === undefined ? "" : ` You are ${message.from.id}.`;
+      await tell(chatId, `This chat is not registered with the agent. Its id is ${chatId}.${who}`, signal);
       return;
     }
 
@@ -119,7 +147,9 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
       await insertSender(tx, record.id, {
         senderId: message.from === undefined ? null : String(message.from.id),
         username: message.from?.username ?? null,
+        firstName: message.from?.first_name ?? null,
         chatId,
+        chatType,
         telegramMessageId: String(message.message_id),
       });
       return true;
@@ -258,6 +288,12 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
 
   const inbound = options.messenger.register(channel);
   return channel;
+}
+
+function refusal(mode: TelegramChatMode): string {
+  return mode === "private"
+    ? "This agent answers in direct messages only, and not in group chats."
+    : "This agent answers in group chats only, and not in direct messages.";
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
