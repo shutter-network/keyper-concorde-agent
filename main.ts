@@ -67,7 +67,7 @@ const gateway = createGateway({
   handlers: ({ db, messenger, telegram, users }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived from the group for keyper {{keyper}}.{{#if writer}} It was written by {{writer}}, {{role}}.{{/if}} They said:
+        template: `A message arrived from the group for keyper {{keyper}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
 
 {{text}}
 
@@ -77,6 +77,7 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
         data: async (signal) => {
           const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
           const user = await users.get(signal.payload.userId);
+          telegram.expectReplyTo(signal.payload.userId, sender?.telegramMessageId ?? null);
           return promptData(signal.payload, sender, user?.attributes);
         },
       }),

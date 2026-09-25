@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
-import { promptData, roleOf, UnboundGroupError, writerOf } from "./prompt.ts";
+import { promptData, roleOf, UnboundGroupError } from "./prompt.ts";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
 const operator = "874974777";
@@ -30,32 +30,6 @@ const message: MessageRecord = {
 
 const bound = { name: "Ops kpr-jstcz", keyper: "kpr-jstcz", operators: [operator] };
 
-describe("naming the writer", () => {
-  it("prefers the username", () => {
-    assert.equal(writerOf(senderOf(operator, "alice")), "@alice");
-  });
-
-  // Telegram requires a first name of a sender and not a username, so this is the common case for
-  // anyone who has never set a handle.
-  it("falls back to the first name", () => {
-    assert.equal(writerOf(senderOf(operator, null, "Mini")), "Mini");
-  });
-
-  // Addressing somebody as a number is the last resort, not the second one.
-  it("falls back to the numeric id only when there is no name at all", () => {
-    assert.equal(writerOf(senderOf(operator, null, null)), operator);
-  });
-
-  it("prefers the username over the first name", () => {
-    assert.equal(writerOf(senderOf(operator, "alice", "Alice")), "@alice");
-  });
-
-  it("names nobody for a message Telegram named no sender for", () => {
-    assert.equal(writerOf(senderOf(null, null)), null);
-    assert.equal(writerOf(undefined), null);
-  });
-});
-
 describe("telling an operator from a teammate", () => {
   it("knows the operator", () => {
     assert.equal(roleOf(senderOf(operator, "alice"), [operator]), "the operator");
@@ -82,21 +56,31 @@ describe("telling an operator from a teammate", () => {
 
 describe("assembling the prompt's values", () => {
   it("carries the keyper, the writer and their role", () => {
-    assert.deepEqual(promptData(message, senderOf(operator, "alice"), bound), {
+    // No username, no first name, no id: naming the room's members is not the model's business,
+    // and the answer is attached to the question instead.
+    assert.deepEqual(promptData(message, senderOf(operator, "alice", "Alice"), bound), {
       userId: message.userId,
       text: "how is it doing",
       keyper: "kpr-jstcz",
-      writer: "@alice",
       role: "the operator",
     });
   });
 
-  it("supplies writer and role as null rather than leaving them out", () => {
+  it("supplies the role as null rather than leaving it out", () => {
     const data = promptData(message, undefined, bound);
-    assert.equal(data.writer, null);
     assert.equal(data.role, null);
     // Handlebars runs strict here: a key the template names and this omits fails the Signal.
-    assert.deepEqual(Object.keys(data).sort(), ["keyper", "role", "text", "userId", "writer"]);
+    assert.deepEqual(Object.keys(data).sort(), ["keyper", "role", "text", "userId"]);
+  });
+
+  // The whole point of dropping the writer: a handle must not reach the model through the values
+  // this builds. One written into the message text still does, and cannot be helped here.
+  it("carries no username, first name or sender id anywhere", () => {
+    const data = promptData(message, senderOf(operator, "alice", "Alice"), bound);
+    const rendered = JSON.stringify(data);
+    for (const leak of ["alice", "Alice", operator]) {
+      assert.equal(rendered.includes(leak), false, `${leak} reached the prompt values`);
+    }
   });
 
   // A hand-edited row is the reason `promptData` checks rather than casts, and a sender id written

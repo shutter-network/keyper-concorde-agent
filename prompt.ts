@@ -20,7 +20,6 @@ export type PromptData = {
   readonly userId: string;
   readonly text: string;
   readonly keyper: string;
-  readonly writer: string | null;
   readonly role: string | null;
 };
 
@@ -31,16 +30,6 @@ export class UnboundGroupError extends Error {
     );
     this.name = "UnboundGroupError";
   }
-}
-
-// A handle to name in a sentence. Telegram requires neither a username nor anything else of a
-// sender but their first name, so the fall is `@handle`, then that name, then the bare id, which
-// addresses somebody as a number and is a last resort. A message Telegram named no sender for has
-// nobody to name at all.
-export function writerOf(sender: TelegramSender | undefined): string | null {
-  if (sender === undefined) return null;
-  if (sender.username !== null) return `@${sender.username}`;
-  return sender.firstName ?? sender.senderId;
 }
 
 // Everyone who is not an operator is a teammate: with two roles and no privilege, the operators are
@@ -76,7 +65,6 @@ export function promptData(
     userId: message.userId,
     text: message.text,
     keyper: group.keyper,
-    writer: writerOf(sender),
     role: roleOf(sender, operators),
   };
 }

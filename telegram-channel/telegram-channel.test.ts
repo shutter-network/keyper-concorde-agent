@@ -16,7 +16,7 @@ import { type FakeBotApi, startFakeBotApi } from "./fake-bot-api.ts";
 import { UnrecordedChatError } from "./outbound.ts";
 import * as telegramChannelSchema from "./schema/index.ts";
 import { outbox, senders, telegramChannelTables } from "./schema/index.ts";
-import type { TelegramUpdate } from "./telegram-api.ts";
+import { maxTextLength, type TelegramUpdate } from "./telegram-api.ts";
 import {
   createTelegramChannel,
   type TelegramChannel,
@@ -48,9 +48,10 @@ const textUpdate = (
   text: string,
   id: number = nextUpdate++,
   chatType = "private",
+  messageId: number = id,
 ): TelegramUpdate => ({
   update_id: id,
-  message: { message_id: id, text, chat: { id: Number(chatId), type: chatType } },
+  message: { message_id: messageId, text, chat: { id: Number(chatId), type: chatType } },
 });
 
 before(async () => {
@@ -558,6 +559,79 @@ describe("outbound", () => {
       await channel.stop();
       await api.stop();
     }
+  });
+});
+
+describe("quoting the question", () => {
+  it("attaches a reply to the message the Run was woken by", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      const messageId = 4321;
+      api.push(textUpdate(chatId, "is it synced", nextUpdate++, "supergroup", messageId));
+      await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
+
+      const [inbound] = await messenger.history(userId);
+      const sender = await db.tx((tx) => channel.senderOf(tx, inbound.id));
+      channel.expectReplyTo(userId, sender?.telegramMessageId ?? null);
+
+      await db.tx((tx) => messenger.send(tx, userId, "yes, it is synced"));
+      await waitUntil("Telegram received it", () => sentTo(api, chatId).length === 1);
+      assert.equal(sentTo(api, chatId)[0].replyTo, String(messageId));
+      // Without this, Telegram refuses the send outright once the question is deleted, and a 4xx
+      // is permanent here: the answer would be dropped rather than merely losing its quote.
+      assert.equal(sentTo(api, chatId)[0].allowWithoutReply, true);
+    });
+  });
+
+  // A question that arrives while a Run is in flight is a Signal nobody has claimed, so it must not
+  // move the target: that is the whole difference from quoting whatever was said last.
+  it("quotes the question being answered, not a later one", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      api.push(textUpdate(chatId, "first question", nextUpdate++, "supergroup", 100));
+      await waitUntil("the first arrived", async () => (await messenger.history(userId)).length === 1);
+      const [first] = await messenger.history(userId);
+      channel.expectReplyTo(userId, (await db.tx((tx) => channel.senderOf(tx, first.id)))?.telegramMessageId ?? null);
+
+      // Someone else writes while the Run is still going.
+      api.push(textUpdate(chatId, "second question", nextUpdate++, "supergroup", 101));
+      await waitUntil("the second arrived", async () => (await messenger.history(userId)).length === 2);
+
+      await db.tx((tx) => messenger.send(tx, userId, "answering the first"));
+      await waitUntil("Telegram received it", () => sentTo(api, chatId).length === 1);
+      assert.equal(sentTo(api, chatId)[0].replyTo, "100");
+    });
+  });
+
+  it("sends with no quote when nothing is expected", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      await db.tx((tx) => messenger.send(tx, userId, "unprompted"));
+      await waitUntil("Telegram received it", () => sentTo(api, chatId).length === 1);
+      assert.equal(sentTo(api, chatId)[0].replyTo, undefined);
+    });
+  });
+
+  // Only the first, so a long answer does not repeat the question down the room.
+  it("quotes the first chunk of a split reply and no other", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      channel.expectReplyTo(userId, "777");
+      await db.tx((tx) => messenger.send(tx, userId, "x".repeat(maxTextLength + 50)));
+      await waitUntil("both chunks arrived", () => sentTo(api, chatId).length === 2);
+      assert.deepEqual(sentTo(api, chatId).map((m) => m.replyTo), ["777", undefined]);
+    });
+  });
+
+  it("forgets a target when told there is none", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      channel.expectReplyTo(userId, "555");
+      channel.expectReplyTo(userId, null);
+      await db.tx((tx) => messenger.send(tx, userId, "no quote"));
+      await waitUntil("Telegram received it", () => sentTo(api, chatId).length === 1);
+      assert.equal(sentTo(api, chatId)[0].replyTo, undefined);
+    });
   });
 });
 

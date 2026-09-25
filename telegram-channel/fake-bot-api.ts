@@ -8,7 +8,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { TelegramUpdate } from "./telegram-api.ts";
 
-export type SentMessage = { readonly chatId: string; readonly text: string };
+export type SentMessage = {
+  readonly chatId: string;
+  readonly text: string;
+  readonly replyTo: string | undefined;
+  readonly allowWithoutReply: boolean;
+};
 
 export type Refusal = {
   readonly code: number;
@@ -60,7 +65,12 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
     }
 
     if (method === "sendMessage") {
-      const message = { chatId: String(body.chat_id), text: String(body.text) };
+      const message = {
+        chatId: String(body.chat_id),
+        text: String(body.text),
+        replyTo: body.reply_to_message_id === undefined ? undefined : String(body.reply_to_message_id),
+        allowWithoutReply: body.allow_sending_without_reply === true,
+      };
       const refusal = refusals.get(message.chatId);
       if (refusal !== undefined) {
         refused.push(message);

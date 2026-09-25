@@ -34,6 +34,8 @@ export const outbox = telegramChannelSchema.table("outbox", {
     .references(() => users.id),
   chatId: text("chat_id").notNull(),
   text: text("text").notNull(),
+  // The Telegram message this reply is attached to, so the room can see which question it answers.
+  replyTo: text("reply_to"),
   reason: text("reason"),
   queuedAt: timestamp("queued_at", { withTimezone: true })
     .notNull()
