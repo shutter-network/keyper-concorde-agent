@@ -81,9 +81,33 @@ export function createTelegramApi(token: string, baseUrl = "https://api.telegram
       return call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message"] }, bounded);
     },
 
-    async sendMessage(chatId: string, text: string, signal: AbortSignal): Promise<void> {
+    // `replyTo` attaches the answer to the question it answers. Only the first chunk carries it:
+    // a long answer is rare, another message landing between two chunks of one rarer still, and
+    // quoting on every chunk would repeat the question down the room.
+    //
+    // `allow_sending_without_reply` because the question may have been deleted by the time the
+    // answer is ready, and Telegram refuses the send outright otherwise -- a 4xx this Channel reads
+    // as permanent, which would drop the answer rather than the quote.
+    async sendMessage(
+      chatId: string,
+      text: string,
+      signal: AbortSignal,
+      replyTo?: string,
+    ): Promise<void> {
+      let quote = replyTo;
       for (const chunk of chunks(text)) {
-        await call("sendMessage", { chat_id: chatId, text: chunk }, signal);
+        await call(
+          "sendMessage",
+          {
+            chat_id: chatId,
+            text: chunk,
+            ...(quote === undefined
+              ? {}
+              : { reply_to_message_id: Number(quote), allow_sending_without_reply: true }),
+          },
+          signal,
+        );
+        quote = undefined;
       }
     },
   };
