@@ -398,6 +398,60 @@ describe("sender metadata", () => {
       assert.equal((await senderRows(message.id)).length, 1); // and no second metadata row
     });
   });
+
+  it("gives the handle last seen for each sender asked about", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      api.push(updateFrom(chatId, "one", { id: 11, username: "ada", first_name: "Ada" }));
+      api.push(updateFrom(chatId, "two", { id: 22, username: "grace", first_name: "Grace" }));
+      await waitUntil("both arrived", async () => (await messenger.history(userId)).length === 2);
+
+      assert.deepEqual(
+        await db.tx((tx) => channel.usernamesOf(tx, ["11", "22"])),
+        new Map([
+          ["11", "ada"],
+          ["22", "grace"],
+        ]),
+      );
+    });
+  });
+
+  // A username is a snapshot, not an identity. Addressing somebody by a handle they have given up
+  // reaches a stranger or nobody, so the latest row wins and an older one is never fallen back to.
+  it("prefers the latest handle, and reports none once a sender has dropped theirs", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      api.push(updateFrom(chatId, "as ada", { id: 33, username: "ada", first_name: "Ada" }));
+      await waitUntil("the first arrived", async () => (await messenger.history(userId)).length === 1);
+      api.push(updateFrom(chatId, "as adalovelace", { id: 33, username: "adalovelace", first_name: "Ada" }));
+      await waitUntil("the second arrived", async () => (await messenger.history(userId)).length === 2);
+
+      assert.deepEqual(
+        await db.tx((tx) => channel.usernamesOf(tx, ["33"])),
+        new Map([["33", "adalovelace"]]),
+      );
+
+      api.push(updateFrom(chatId, "as nobody", { id: 33, first_name: "Ada" }));
+      await waitUntil("the third arrived", async () => (await messenger.history(userId)).length === 3);
+      assert.deepEqual(await db.tx((tx) => channel.usernamesOf(tx, ["33"])), new Map());
+    });
+  });
+
+  it("leaves out a sender it has never seen write, rather than guessing at one", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      api.push(updateFrom(chatId, "hello", { id: 44, username: "ada", first_name: "Ada" }));
+      await waitUntil("it arrived", async () => (await messenger.history(userId)).length === 1);
+
+      // 55 is an operator recorded by hand from an enrollment reply and silent ever since: under
+      // group privacy that is the ordinary case, not an edge one.
+      assert.deepEqual(
+        await db.tx((tx) => channel.usernamesOf(tx, ["44", "55"])),
+        new Map([["44", "ada"]]),
+      );
+      assert.deepEqual(await db.tx((tx) => channel.usernamesOf(tx, [])), new Map());
+    });
+  });
 });
 
 describe("chat modes", () => {

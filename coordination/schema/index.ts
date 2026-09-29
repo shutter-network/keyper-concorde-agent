@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgSchema, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, pgSchema, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { users } from "@shutter-network/concorde/users/schema";
 
 export const roundsSchema = pgSchema("keyper_rounds");
@@ -18,6 +18,10 @@ export const rounds = roundsSchema.table("rounds", {
   askedTelegramMessageId: text("asked_telegram_message_id"),
   keyperset: text("keyperset").notNull(),
   question: text("question").notNull(),
+  // How many times the operators have been asked to revise. Bounded, because an operator who
+  // genuinely cannot make it would otherwise be asked forever, and being asked repeatedly to change
+  // your availability costs something a status query does not.
+  attempts: integer("attempts").notNull().default(0),
   openedAt: timestamp("opened_at", { withTimezone: true })
     .notNull()
     .default(sql`clock_timestamp()`),
@@ -40,6 +44,10 @@ export const roundAsks = roundsSchema.table(
     askedAt: timestamp("asked_at", { withTimezone: true })
       .notNull()
       .default(sql`clock_timestamp()`),
+    // When this chat was last asked to move. Until it answers again its earlier window is stale, so
+    // the round is still waiting on it -- otherwise one outlier replying re-opens the whole question
+    // while another is still being waited on, and the one who has not replied gets asked twice.
+    reviseAskedAt: timestamp("revise_asked_at", { withTimezone: true }),
   },
   (table) => [primaryKey({ columns: [table.roundId, table.userId] })],
 );

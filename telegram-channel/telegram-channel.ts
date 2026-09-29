@@ -27,7 +27,12 @@ import {
   UnrecordedChatError,
 } from "./outbound.ts";
 import { received, telegramChannelTables } from "./schema/index.ts";
-import { insertSender, selectSenderFor, type TelegramSender } from "./senders.ts";
+import {
+  insertSender,
+  selectSenderFor,
+  selectUsernamesFor,
+  type TelegramSender,
+} from "./senders.ts";
 import { createTelegramApi, TelegramApiError, type TelegramUpdate } from "./telegram-api.ts";
 
 const channelName = "telegram";
@@ -74,6 +79,16 @@ export type TelegramChannel = Channel & {
     tx: Handle<TSchema>,
     messageId: string,
   ): Promise<TelegramSender | undefined>;
+
+  /**
+   * The username last seen for each of these senders, by sender id. A sender the bot has never seen
+   * write, or whose latest message carried no username, is simply absent -- there is nothing to
+   * address them by, and a handle must never be guessed at.
+   */
+  usernamesOf<TSchema extends Record<string, unknown>>(
+    tx: Handle<TSchema>,
+    senderIds: readonly string[],
+  ): Promise<Map<string, string>>;
 
   /**
    * The Telegram message this Run is answering, or null when it answers none. Set while the Signal
@@ -262,6 +277,7 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
     recordChat: (tx, userId, chatId) => insertChat(tx, userId, chatId),
     chatOf: (tx, userId) => selectChatFor(tx, userId),
     senderOf: (tx, messageId) => selectSenderFor(tx, messageId),
+    usernamesOf: (tx, senderIds) => selectUsernamesFor(tx, senderIds),
     expectReplyTo: (userId, telegramMessageId) => {
       replyTargets.clear();
       if (telegramMessageId !== null) replyTargets.set(userId, telegramMessageId);

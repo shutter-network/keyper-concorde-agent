@@ -62,9 +62,19 @@ const gateway = createGateway({
     // the User behind, so the Channel is asked rather than assumed.
     const reachable = async (userId: string) =>
       (await db.tx((tx) => telegram.chatOf(tx, userId))) !== undefined;
-    const rounds = createRounds({ db, users, messenger, worker, agentServer, reachable });
+    // Neither of these arrives as a reply, so neither can quote the question it answers -- an
+    // @handle on the first line is what tells a room its operator is the one being asked. The
+    // Channel is asked for the handles, because they are its tables and coordination/ must not
+    // learn them.
+    const usernamesOf = (senderIds: readonly string[]) =>
+      db.tx((tx) => telegram.usernamesOf(tx, senderIds));
+    const rounds = createRounds({
+      db, users, messenger, worker, agentServer, reachable, usernamesOf,
+    });
     // The other half: telling each keyper's operators something and waiting for nothing.
-    const announcements = createAnnouncements({ db, users, messenger, agentServer, reachable });
+    const announcements = createAnnouncements({
+      db, users, messenger, agentServer, reachable, usernamesOf,
+    });
     // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
     // Groups only. Every User here is a room bound to one keyper, so a 1:1 chat has no keyper to
     // answer about and is refused before it becomes a Message.
@@ -123,13 +133,15 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
     // does not, and a wrong answer here would name a time nobody can make.
     [roundCompletedKind]: {
       ...templateHandler<RoundCompleted>({
-        template: `Every operator asked about keyperset {{keyperset}} has answered.
+        template: `Every operator asked about keyperset {{keyperset}} has answered. They were asked: "{{question}}"
 
 {{#each windows}}- {{keyper}} said "{{said}}", which is {{from}} to {{to}} UTC
 {{/each}}
 {{#if overlap}}All {{total}} of them overlap from {{overlap.from}} to {{overlap.to}} UTC.{{else}}{{#if agreement}}No window works for all {{total}}. The largest group that can meet is {{agreement.count}} of {{total}}, from {{agreement.from}} to {{agreement.to}} UTC: {{agreement.agreed}}. Outside it: {{agreement.outside}}.{{else}}No two of them overlap at all.{{/if}}{{/if}}
 
-Report this to user {{userId}}, in this order: every operator's window as they gave it; then {{#if overlap}}the window they all share{{else}}the largest group that can meet, when and who, and who is outside it{{/if}}.{{#unless overlap}} Then say they can open a fresh round suggesting a specific day or window, so the operators have something to converge on.{{/unless}} Times are UTC. Do not pick a time for them and do not open anything yourself; a person decides. Your final reply here reaches nobody.`,
+{{#if overlap}}Report to user {{userId}}: every operator's window as they gave it, then the window they all share. Times are UTC. Do not pick a time for them; a person decides.{{else}}{{#if negotiating}}Ask them to converge, and say so in the room. Attempts left after this one: {{attemptsLeft}}.
+
+{{#if agreement}}Ask the ones outside it -- {{agreement.outside}} -- to move to {{agreement.from}} to {{agreement.to}} UTC, since the others already can.{{else}}Nobody shares a window, so ask every one of them to converge, naming the widest partial agreement there is as the target.{{/if}} Use the revise route, naming that target window and keeping whatever day or range the team asked for above. Then tell user {{userId}} in one line that no common window was found and who you have asked to move.{{else}}Report to user {{userId}}: every operator's window, then the largest group that can meet, when and who, and who is outside it. They have been asked to revise {{attempts}} times and will not be asked again, so say the operators outside it did not converge and that the team can open a fresh round with a specific day or window. Times are UTC. Do not pick a time for them; a person decides.{{/if}}{{/if}} Your final reply here reaches nobody.`,
         session: (signal) => `round_${signal.payload.roundId}`,
         data: async (signal) => {
           const found = await rounds.report(signal.payload.roundId);
@@ -156,6 +168,12 @@ Report this to user {{userId}}, in this order: every operator's window as they g
               to: w.toAt.toISOString(),
             })),
             total: entries.length,
+            question: found.round.question,
+            attempts: found.round.attempts,
+            attemptsLeft: found.attemptsLeft,
+            // Whether this is a negotiation or the end is settled in code, so the model is told
+            // which it is rather than deciding.
+            negotiating: overlap === undefined && found.attemptsLeft > 0,
             overlap:
               overlap === undefined
                 ? null

@@ -18,7 +18,7 @@ import {
   type TestDatabase,
 } from "../telegram-channel/test-support.ts";
 import { createAnnouncements } from "./announce.ts";
-import { createRounds, roundCompletedKind, type Rounds } from "./rounds.ts";
+import { createRounds, maxAttempts, roundCompletedKind, type Rounds } from "./rounds.ts";
 import * as roundsSchema from "./schema/index.ts";
 
 const nowhere = { port: 0, host: "127.0.0.1" } as const;
@@ -32,6 +32,9 @@ let sent: { userId: string; text: string }[];
 // Stands in for the Channel: a User is reachable once a chat is recorded for it. `remove-chat`
 // leaves the User behind, so having a keyper and being reachable are different things.
 let withChat: Set<string>;
+// Also stands in for the Channel: the handle last seen for a sender. A sender that has never been
+// seen writing is simply absent, which is the case a room with an unaddressable operator exercises.
+let handles: Map<string, string>;
 
 // Enough of a Channel for the Messenger to accept a send. The rounds component only cares that a
 // question left the building, not how.
@@ -44,10 +47,14 @@ const recordingChannel = (): Channel => ({
   async stop() {},
 });
 
-async function keyperChat(name: string, keyper: string): Promise<string> {
+async function keyperChat(
+  name: string,
+  keyper: string,
+  operators: readonly string[] = [],
+): Promise<string> {
   const id = await db.tx(async (tx) => {
     const user = await users.create(tx);
-    await users.setAttributes(tx, user.id, { kind: "keyper", name, keyper });
+    await users.setAttributes(tx, user.id, { kind: "keyper", name, keyper, operators });
     return user.id;
   });
   withChat.add(id);
@@ -88,6 +95,7 @@ before(async () => {
   await applySchema(db, signalsSchema, usersSchema, messengerSchema, roundsSchema);
   users = createUsers({ db });
   withChat = new Set<string>();
+  handles = new Map<string, string>();
   api = Fastify();
   const agentServer = serverComponent(api, nowhere);
   const runtime: Runtime = { run: async () => ({ ok: true }) };
@@ -95,8 +103,15 @@ before(async () => {
   const messenger = createMessenger({ db, users, worker, agentServer });
   messenger.register(recordingChannel());
   const reachable = async (userId: string) => withChat.has(userId);
-  rounds = createRounds({ db, users, messenger, worker, agentServer, reachable });
-  createAnnouncements({ db, users, messenger, agentServer, reachable });
+  const usernamesOf = async (senderIds: readonly string[]) =>
+    new Map(
+      senderIds.flatMap((id) => {
+        const handle = handles.get(id);
+        return handle === undefined ? [] : [[id, handle] as [string, string]];
+      }),
+    );
+  rounds = createRounds({ db, users, messenger, worker, agentServer, reachable, usernamesOf });
+  createAnnouncements({ db, users, messenger, agentServer, reachable, usernamesOf });
   await api.ready();
 });
 
@@ -104,6 +119,7 @@ after(() => database.drop());
 
 beforeEach(() => {
   sent = [];
+  handles = new Map<string, string>();
 });
 
 describe("opening a round", () => {
@@ -400,6 +416,116 @@ describe("telling each keyper's operators something", () => {
   });
 });
 
+describe("addressing a room's operator", () => {
+  // Neither a fan-out nor a round's question is a reply, so neither quotes anything. Without the
+  // handle a room is shown a bare statement with nothing saying its operator is the one being asked.
+  it("puts the operator's handle above a fan-out, and leaves the text alone", async () => {
+    handles.set("874974777", "ada");
+    const chat = await keyperChat("ops q1", "kpr-men-1", ["874974777"]);
+
+    const reply = await post("/announce", {
+      messages: [{ keyper: "kpr-men-1", text: "7-day uptime for kpr-men-1: 99.89%." }],
+    });
+
+    assert.equal(reply.statusCode, 200);
+    assert.deepEqual(sent, [
+      { userId: chat, text: "@ada\n7-day uptime for kpr-men-1: 99.89%." },
+    ]);
+  });
+
+  it("addresses each room's own operator and nobody else's", async () => {
+    handles.set("1", "ada");
+    handles.set("2", "grace");
+    const one = await keyperChat("ops q2", "kpr-men-2", ["1"]);
+    const two = await keyperChat("ops q3", "kpr-men-3", ["2"]);
+
+    await post("/announce", {
+      messages: [
+        { keyper: "kpr-men-2", text: "yours is up" },
+        { keyper: "kpr-men-3", text: "yours is down" },
+      ],
+    });
+
+    assert.deepEqual(
+      sent.sort((a, b) => a.userId.localeCompare(b.userId)),
+      [
+        { userId: one, text: "@ada\nyours is up" },
+        { userId: two, text: "@grace\nyours is down" },
+      ].sort((a, b) => a.userId.localeCompare(b.userId)),
+    );
+  });
+
+  // The fallback is the common case at first: under group privacy the bot only sees an @mention or
+  // a reply to itself, so an operator recorded from the enrollment reply and silent since has no
+  // handle on file at all.
+  it("sends exactly what it would have when the operator has never been seen writing", async () => {
+    const chat = await keyperChat("ops q4", "kpr-men-4", ["874974777"]);
+    await post("/announce", { messages: [{ keyper: "kpr-men-4", text: "kpr-men-4 is up" }] });
+    assert.deepEqual(sent, [{ userId: chat, text: "kpr-men-4 is up" }]);
+  });
+
+  it("addresses the operator a round's question is asked of", async () => {
+    handles.set("3", "ada");
+    const asking = await teammateChat("team mention a");
+    const chat = await keyperChat("ops q5", "kpr-men-6", ["3"]);
+    rounds.actingFor({ userId: asking, telegramMessageId: "900" });
+
+    await post("/rounds", {
+      keyperset: "set-mention-a",
+      keypers: ["kpr-men-6"],
+      question: "When can you do a DKG?",
+    });
+
+    assert.deepEqual(sent, [{ userId: chat, text: "@ada\nWhen can you do a DKG?" }]);
+  });
+
+  it("addresses an operator asked to move, on every attempt", async () => {
+    handles.set("4", "ada");
+    handles.set("5", "grace");
+    const asking = await teammateChat("team mention c");
+    const early = await keyperChat("ops r1", "kpr-men-7", ["4"]);
+    const late = await keyperChat("ops r2", "kpr-men-8", ["5"]);
+    rounds.actingFor({ userId: asking, telegramMessageId: "901" });
+    const opened = (
+      await post("/rounds", { keyperset: "set-mention-c", keypers: ["kpr-men-7", "kpr-men-8"], question: "when?" })
+    ).json();
+
+    sent = [];
+    const reply = await post(`/rounds/${opened.round.id}/revise`, {
+      keypers: ["kpr-men-8"],
+      text: "Could you move to 13:00-15:00 UTC?",
+    });
+
+    assert.equal(reply.statusCode, 200);
+    // Only the outlier is written to, and it is their own handle that is used, not the round's.
+    assert.deepEqual(sent, [
+      { userId: late, text: "@grace\nCould you move to 13:00-15:00 UTC?" },
+    ]);
+    assert.notEqual(late, early);
+  });
+
+  // A handle recorded after the round opened still reaches them: the lookup is fresh per message,
+  // not remembered from when the round was created.
+  it("uses a handle first seen after the round opened", async () => {
+    const asking = await teammateChat("team mention b");
+    const chat = await keyperChat("ops s1", "kpr-men-5", ["6"]);
+    rounds.actingFor({ userId: asking, telegramMessageId: "902" });
+    const opened = (
+      await post("/rounds", { keyperset: "set-mention-b", keypers: ["kpr-men-5"], question: "when?" })
+    ).json();
+    assert.deepEqual(sent, [{ userId: chat, text: "when?" }]);
+
+    sent = [];
+    handles.set("6", "ada");
+    await post(`/rounds/${opened.round.id}/revise`, {
+      keypers: ["kpr-men-5"],
+      text: "Could you move?",
+    });
+
+    assert.deepEqual(sent, [{ userId: chat, text: "@ada\nCould you move?" }]);
+  });
+});
+
 describe("a keyper whose chat was removed", () => {
   // Found live: two Users shared one keyper, one of them left chatless by `remove-chat`, and which
   // one was taken came down to the order `users.list` returned. The chatless one won, and that
@@ -433,5 +559,181 @@ describe("a keyper whose chat was removed", () => {
       sent.map((m) => m.userId).sort(),
       [first, second].sort(),
     );
+  });
+});
+
+describe("converging when the windows do not meet", () => {
+  // A round whose answers do not overlap is not finished: the operators are asked to move, and the
+  // round is worked out again when they have.
+  async function roundOf(tag: string, windows: readonly (readonly [number, number])[]) {
+    const asking = await teammateChat(`team ${tag}`);
+    const chats = await Promise.all(windows.map((_, i) => keyperChat(`ops ${tag}${i}`, `kpr-${tag}${i}`)));
+    rounds.actingFor({ userId: asking, telegramMessageId: "600" });
+    const round = (
+      await post("/rounds", {
+        keyperset: `set-${tag}`,
+        keypers: chats.map((_, i) => `kpr-${tag}${i}`),
+        question: "when can you do a DKG?",
+      })
+    ).json();
+    for (const [i, [from, to]] of windows.entries()) {
+      rounds.actingFor({ userId: chats[i], telegramMessageId: `60${i}` });
+      await post(`/rounds/${round.round.id}/answers`, { from: utc(from), to: utc(to), said: "said" });
+    }
+    return { asking, chats, id: round.round.id };
+  }
+
+  it("does not report a round whose windows do not meet, while attempts remain", async () => {
+    const before = await completedSignals();
+    const { id } = await roundOf("u", [[9, 12], [14, 17]]);
+
+    // Woken to negotiate, not to report: nothing is stamped, so the round is still live.
+    assert.equal(await completedSignals(), before + 1);
+    const [row] = await db.handle({ rounds: roundsSchema.rounds }).select().from(roundsSchema.rounds).where(eq(roundsSchema.rounds.id, id));
+    assert.equal(row.reportedAt, null);
+  });
+
+  it("asks the named operators to move and counts the attempt", async () => {
+    const { id, chats } = await roundOf("v", [[9, 12], [14, 17]]);
+    sent = [];
+
+    const reply = await post(`/rounds/${id}/revise`, {
+      keypers: ["kpr-v1"],
+      text: "the others can do 09:00-12:00, can you move?",
+    });
+
+    assert.deepEqual(reply.json().asked, ["kpr-v1"]);
+    assert.equal(reply.json().attempts, 1);
+    assert.equal(reply.json().attemptsLeft, maxAttempts - 1);
+    assert.deepEqual(sent, [{ userId: chats[1], text: "the others can do 09:00-12:00, can you move?" }]);
+  });
+
+  it("works the round out again when the revision lands, and reports once they meet", async () => {
+    const { id, chats } = await roundOf("w", [[9, 12], [14, 17]]);
+    await post(`/rounds/${id}/revise`, { keypers: ["kpr-w1"], text: "please move" });
+    const before = await completedSignals();
+
+    rounds.actingFor({ userId: chats[1], telegramMessageId: "610" });
+    const revised = await post(`/rounds/${id}/answers`, { from: utc(10), to: utc(13), said: "moved" });
+
+    assert.equal(revised.json().complete, true);
+    assert.equal(await completedSignals(), before + 1);
+    const [row] = await db.handle({ rounds: roundsSchema.rounds }).select().from(roundsSchema.rounds).where(eq(roundsSchema.rounds.id, id));
+    assert.notEqual(row.reportedAt, null, "they meet now, so the round is finished");
+  });
+
+  // An operator who cannot make it would otherwise be asked forever.
+  it("refuses a further attempt once the bound is spent, and then reports", async () => {
+    const { id, chats } = await roundOf("x", [[9, 12], [14, 17]]);
+    for (let i = 0; i < maxAttempts; i++) {
+      assert.equal((await post(`/rounds/${id}/revise`, { keypers: ["kpr-x1"], text: "move" })).statusCode, 200);
+    }
+    const refused = await post(`/rounds/${id}/revise`, { keypers: ["kpr-x1"], text: "move again" });
+    assert.equal(refused.statusCode, 409);
+
+    // The next answer ends the round even though the windows still do not meet.
+    rounds.actingFor({ userId: chats[1], telegramMessageId: "611" });
+    await post(`/rounds/${id}/answers`, { from: utc(15), to: utc(18), said: "still later" });
+    const [row] = await db.handle({ rounds: roundsSchema.rounds }).select().from(roundsSchema.rounds).where(eq(roundsSchema.rounds.id, id));
+    assert.notEqual(row.reportedAt, null, "out of attempts, so it reports what it has");
+  });
+
+  it("refuses to revise a keyper the round never asked", async () => {
+    const { id } = await roundOf("y", [[9, 12], [14, 17]]);
+    assert.equal((await post(`/rounds/${id}/revise`, { keypers: ["kpr-elsewhere"], text: "?" })).statusCode, 404);
+  });
+});
+
+describe("two outliers asked to move at once", () => {
+  // Found live: one outlier replying re-completed the round while the other was still being waited
+  // on, so the agent re-evaluated a half-updated picture, re-asked somebody it had already asked,
+  // and spent a second attempt doing it.
+  it("waits for every operator it asked, not just the first to reply", async () => {
+    const asking = await teammateChat("team z");
+    const early = await keyperChat("ops z0", "kpr-z0");
+    const mid = await keyperChat("ops z1", "kpr-z1");
+    const late = await keyperChat("ops z2", "kpr-z2");
+    rounds.actingFor({ userId: asking, telegramMessageId: "700" });
+    const round = (
+      await post("/rounds", {
+        keyperset: "set-z",
+        keypers: ["kpr-z0", "kpr-z1", "kpr-z2"],
+        question: "when?",
+      })
+    ).json();
+
+    // z1 and z2 agree; z0 is on its own.
+    for (const [chat, from, to] of [
+      [early, 6, 8],
+      [mid, 12, 16],
+      [late, 13, 17],
+    ] as const) {
+      rounds.actingFor({ userId: chat, telegramMessageId: "701" });
+      await post(`/rounds/${round.round.id}/answers`, { from: utc(from), to: utc(to), said: "said" });
+    }
+
+    // Both outliers -- here just z0 plus z2 for the sake of two -- are asked in one attempt.
+    await post(`/rounds/${round.round.id}/revise`, { keypers: ["kpr-z0", "kpr-z2"], text: "move" });
+    const before = await completedSignals();
+
+    // The first of them replies. The round must stay shut: the other has not.
+    rounds.actingFor({ userId: early, telegramMessageId: "702" });
+    const first = await post(`/rounds/${round.round.id}/answers`, {
+      from: utc(13),
+      to: utc(16),
+      said: "moved",
+    });
+    assert.equal(first.json().complete, false, "still waiting on the other one it asked");
+    assert.equal(await completedSignals(), before, "and nothing woke the agent to re-ask them");
+
+    // The second replies, and only now is the round worked out again.
+    rounds.actingFor({ userId: late, telegramMessageId: "703" });
+    const second = await post(`/rounds/${round.round.id}/answers`, {
+      from: utc(13),
+      to: utc(17),
+      said: "moved too",
+    });
+    assert.equal(second.json().complete, true);
+    assert.equal(await completedSignals(), before + 1);
+  });
+
+  it("tells a chat asked to move that it owes an answer again", async () => {
+    const asking = await teammateChat("team aa");
+    const one = await keyperChat("ops aa0", "kpr-aa0");
+    const two = await keyperChat("ops aa1", "kpr-aa1");
+    rounds.actingFor({ userId: asking, telegramMessageId: "710" });
+    const round = (
+      await post("/rounds", { keyperset: "set-aa", keypers: ["kpr-aa0", "kpr-aa1"], question: "?" })
+    ).json();
+    // Windows that do not meet, so the round stays open rather than reporting at once.
+    for (const [chat, from, to] of [
+      [one, 9, 12],
+      [two, 14, 17],
+    ] as const) {
+      rounds.actingFor({ userId: chat, telegramMessageId: "711" });
+      await post(`/rounds/${round.round.id}/answers`, { from: utc(from), to: utc(to), said: "said" });
+    }
+
+    // Answered, so nothing is owed.
+    assert.equal(await rounds.awaiting(one), undefined);
+
+    await post(`/rounds/${round.round.id}/revise`, { keypers: ["kpr-aa0"], text: "move" });
+
+    // Asked to move: its prompt must say the round is open, or it cannot record the revision.
+    assert.equal((await rounds.awaiting(one))?.id, round.round.id);
+    // And the one not asked still owes nothing.
+    assert.equal(await rounds.awaiting(two), undefined);
+  });
+
+  it("will not ask for a revision once the round has reported", async () => {
+    const asking = await teammateChat("team ab");
+    const one = await keyperChat("ops ab", "kpr-ab");
+    rounds.actingFor({ userId: asking, telegramMessageId: "720" });
+    const round = (await post("/rounds", { keyperset: "set-ab", keypers: ["kpr-ab"], question: "?" })).json();
+    rounds.actingFor({ userId: one, telegramMessageId: "721" });
+    await post(`/rounds/${round.round.id}/answers`, { from: utc(9), to: utc(12), said: "said" });
+
+    const refused = await post(`/rounds/${round.round.id}/revise`, { keypers: ["kpr-ab"], text: "move" });
+    assert.equal(refused.statusCode, 404);
   });
 });

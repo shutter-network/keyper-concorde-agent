@@ -11,17 +11,26 @@
 // The PostgreSQL schema stays `keyper_rounds`: rounds are the only thing here with tables, since
 // announcing records nothing beyond the Messages themselves.
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "@shutter-network/concorde/db";
 import type { ServerComponent } from "@shutter-network/concorde/gateway";
 import type { Messenger } from "@shutter-network/concorde/messenger";
 import type { SignalWorker } from "@shutter-network/concorde/signals";
 import type { Users } from "@shutter-network/concorde/users";
 import { keyperChatsByKeyper, splitByChat } from "./keyper-chats.ts";
+import { addressed } from "./mentions.ts";
+import { overlapOf } from "./windows.ts";
 import { roundAnswers, roundAsks, rounds, roundsTables } from "./schema/index.ts";
 import { MalformedWindowError, parseWindow } from "./windows.ts";
 
 export const roundCompletedKind = "round.completed";
+
+/**
+ * How many times the operators may be asked to revise before the round gives up and reports what it
+ * has. Every attempt is a message to somebody who already answered once, so the bound is as much
+ * about not wearing operators out as about terminating.
+ */
+export const maxAttempts = 3;
 
 export type RoundCompleted = { readonly roundId: string };
 
@@ -45,12 +54,22 @@ export type RoundsOptions = {
   readonly agentServer: ServerComponent;
   /** Whether a User can be written to at all. A User with no chat is not a keyper's chat. */
   readonly reachable: (userId: string) => Promise<boolean>;
+  /**
+   * The handle last seen for each of these senders. Injected rather than reached for, because the
+   * usernames live in the Channel's own tables and this component must not learn its schema.
+   */
+  readonly usernamesOf: (senderIds: readonly string[]) => Promise<Map<string, string>>;
 };
 
 export function createRounds(options: RoundsOptions) {
-  const { db, users, messenger, worker, agentServer, reachable } = options;
+  const { db, users, messenger, worker, agentServer, reachable, usernamesOf } = options;
   const handle = db.handle(roundsTables);
   let current: RunContext | undefined;
+
+  // An answer counts only if it came after the last request to move. An operator asked to revise is
+  // being waited on even though their earlier window is still on file, which is what stops one
+  // outlier replying from re-opening the question while another has not.
+  const answeredSinceAsked = sql`${roundAnswers.recordedAt} > coalesce(${roundAsks.reviseAskedAt}, 'epoch'::timestamptz)`;
 
   // A round is open until it either reports or is given up on. The two endings are kept apart:
   // `reportedAt` means every operator answered and the result went out, `closedAt` means a person
@@ -100,12 +119,16 @@ export function createRounds(options: RoundsOptions) {
           "It answers with `opened: false` and that round's state instead, which is what to tell the " +
           "room: a second round would make an operator's reply ambiguous. Close the old one first " +
           "if it is genuinely dead.\n\n" +
-          "`noChat` names the keypers that have no registered chat. They were **not** asked and " +
+          "The answer names the keypers that have no registered chat. They were **not** asked and " +
           "nobody was told — say so, because a short fan-out otherwise looks exactly like a " +
           "complete one.\n\n" +
+          "**Say that in words, never as a field name.** \"Every keyper had a chat\", or \"kpr-x has " +
+          "no chat, so its operators were not asked\" -- never \"noChat empty\". The same goes for " +
+          "everything else these routes answer with: `waitingOn`, `attemptsLeft`, all of it.\n\n" +
           "Which chat asked is taken from the Signal that woke you, never from the body. Word the " +
           "question so operators **reply to it**: a message they merely post in their room does not " +
-          "reach you.",
+          "reach you.\n\n" +
+          "Each room's operator is @mentioned on a line above your text where their handle is known. That is added for you — **do not write an @handle yourself**, and do not ask anyone for one.",
         body: {
           type: "object",
           required: ["keyperset", "keypers", "question"],
@@ -156,6 +179,10 @@ export function createRounds(options: RoundsOptions) {
       return { error: "none of those keypers has a registered chat", noChat };
     }
 
+    // Before the transaction: a read, and one query for the whole fan-out rather than one per chat
+    // inside the write that creates the round.
+    const usernames = await usernamesOf(asking.flatMap((chat) => chat.operators));
+
     const round = await db.tx(async (tx) => {
       const [created] = await tx
         .insert(rounds)
@@ -171,7 +198,7 @@ export function createRounds(options: RoundsOptions) {
       );
       // In the same transaction as the asks, so a round nobody was asked for never exists.
       for (const chat of asking) {
-        await messenger.send(tx, chat.userId, question);
+        await messenger.send(tx, chat.userId, addressed(question, chat.operators, usernames));
       }
       return created;
     });
@@ -271,21 +298,40 @@ export function createRounds(options: RoundsOptions) {
           set: { fromAt: window.from, toAt: window.to, said, recordedAt: sql`clock_timestamp()` },
         });
 
-      // Stamped in the same transaction that completes the round, and only from null, so a
-      // correction arriving afterwards cannot report a second time.
-      const [reported] = await tx
-        .update(rounds)
-        .set({ reportedAt: sql`clock_timestamp()` })
-        .where(
-          and(
-            eq(rounds.id, id),
-            isNull(rounds.reportedAt),
-            sql`(select count(*) from ${roundAsks} where ${roundAsks.roundId} = ${id})
-                 = (select count(*) from ${roundAnswers} where ${roundAnswers.roundId} = ${id})`,
-          ),
-        )
-        .returning({ id: rounds.id });
-      if (reported === undefined) return false;
+      // Everybody answered, or nobody needs waking.
+      const [{ asked, answered }] = await tx
+        .select({
+          asked: sql<number>`(select count(*)::int from ${roundAsks} where ${roundAsks.roundId} = ${id})`,
+          answered: sql<number>`(select count(*)::int
+                                   from ${roundAnswers} ans
+                                   join ${roundAsks} ask
+                                     on ask.round_id = ans.round_id and ask.user_id = ans.user_id
+                                  where ans.round_id = ${id}
+                                    and ans.recorded_at > coalesce(ask.revise_asked_at, 'epoch'::timestamptz))`,
+        })
+        .from(rounds)
+        .where(eq(rounds.id, id));
+      if (asked !== answered) return false;
+
+      // Whether this is the end is decided here rather than by the agent: a round ends when the
+      // windows actually meet, or when the operators have been asked to revise as often as they are
+      // going to be. A revision re-enters this path and is evaluated again.
+      const answers = await tx.select().from(roundAnswers).where(eq(roundAnswers.roundId, id));
+      const meets = overlapOf(answers.map((a) => ({ from: a.fromAt, to: a.toAt }))) !== undefined;
+      const [round] = await tx.select().from(rounds).where(eq(rounds.id, id)).limit(1);
+      const final = meets || round.attempts >= maxAttempts;
+
+      if (final) {
+        // Only from null, so a correction arriving after the report cannot report a second time.
+        const [stamped] = await tx
+          .update(rounds)
+          .set({ reportedAt: sql`clock_timestamp()` })
+          .where(and(eq(rounds.id, id), isNull(rounds.reportedAt)))
+          .returning({ id: rounds.id });
+        if (stamped === undefined) return false;
+      } else if (round.reportedAt !== null) {
+        return false;
+      }
       await worker.emit(tx, { kind: roundCompletedKind, payload: { roundId: id } });
       return true;
     });
@@ -336,6 +382,116 @@ export function createRounds(options: RoundsOptions) {
       ),
     };
   },
+  );
+
+  // Asking some of the operators to move. The round stays open: their revision replaces their
+  // answer and the round is evaluated again, which is what converges it.
+  fastify.post(
+    "/rounds/:id/revise",
+    {
+      schema: {
+        tags: ["Rounds"],
+        summary: "Ask some operators to revise their window",
+        description:
+          "Sends `text` to the chats of the named keypers and counts one attempt against the " +
+          "round. Their replies replace their earlier answers, and the round is worked out again " +
+          "once they are all in — you do not need to do anything else for that.\n\n" +
+          "**Bounded.** After " +
+          String(maxAttempts) +
+          " attempts this is refused and the round reports what it has. Every attempt asks somebody " +
+          "who already answered to change their plans, which costs them something.\n\n" +
+          "Name a target window in `text`, and keep whatever day or range the team asked for in the " +
+          "first place: converging on something concrete is faster than asking people to try again.\n\n" +
+          "Each room's operator is @mentioned on a line above your text where their handle is known. That is added for you — **do not write an @handle yourself**, and do not ask anyone for one.",
+        params: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string" } },
+        },
+        body: {
+          type: "object",
+          required: ["keypers", "text"],
+          properties: {
+            keypers: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string" },
+              description: "Whose operators are asked to move.",
+            },
+            text: { type: "string", description: "What they are asked. Name the window to aim at." },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const { keypers, text } = (request.body ?? {}) as { keypers?: string[]; text?: string };
+      if (!Array.isArray(keypers) || keypers.length === 0 || !text) {
+        reply.code(400);
+        return { error: "a non-empty keypers array and text are wanted" };
+      }
+      const [round] = await handle.select().from(rounds).where(eq(rounds.id, id)).limit(1);
+      if (round === undefined || round.closedAt !== null || round.reportedAt !== null) {
+        reply.code(404);
+        return { error: `no open round ${id}; a round that has reported is already finished` };
+      }
+      if (round.attempts >= maxAttempts) {
+        reply.code(409);
+        return {
+          error: `round ${id} has already used its ${maxAttempts} revision attempts`,
+          attempts: round.attempts,
+        };
+      }
+
+      const asks = await handle.select().from(roundAsks).where(eq(roundAsks.roundId, id));
+      const asking = asks.filter((a) => keypers.includes(a.keyper));
+      if (asking.length === 0) {
+        reply.code(404);
+        return { error: "none of those keypers was asked in this round" };
+      }
+
+      // Resolved fresh rather than remembered from when the round opened: an operator may have been
+      // recorded, or the room re-registered, in between. A chat removed since is simply absent here
+      // and its message goes out unaddressed, exactly as it would have before.
+      const operatorsByUser = new Map<string, readonly string[]>();
+      for (const chats of (await keyperChatsByKeyper(users, reachable)).values()) {
+        for (const chat of chats) operatorsByUser.set(chat.userId, chat.operators);
+      }
+      const usernames = await usernamesOf(
+        asking.flatMap((ask) => [...(operatorsByUser.get(ask.userId) ?? [])]),
+      );
+
+      const attempts = await db.tx(async (tx) => {
+        const [{ attempts }] = await tx
+          .update(rounds)
+          .set({ attempts: sql`${rounds.attempts} + 1` })
+          .where(eq(rounds.id, id))
+          .returning({ attempts: rounds.attempts });
+        await tx
+          .update(roundAsks)
+          .set({ reviseAskedAt: sql`clock_timestamp()` })
+          .where(
+            and(
+              eq(roundAsks.roundId, id),
+              inArray(
+                roundAsks.userId,
+                asking.map((a) => a.userId),
+              ),
+            ),
+          );
+        for (const ask of asking) {
+          const operators = operatorsByUser.get(ask.userId) ?? [];
+          await messenger.send(tx, ask.userId, addressed(text, operators, usernames));
+        }
+        return attempts;
+      });
+
+      return {
+        asked: asking.map((a) => a.keyper),
+        attempts,
+        attemptsLeft: maxAttempts - attempts,
+      };
+    },
   );
 
   // Closing, so a keyperset can be asked again. A person's judgement that a round is dead, never
@@ -400,7 +556,11 @@ export function createRounds(options: RoundsOptions) {
       const [answered] = await handle
         .select({ roundId: roundAnswers.roundId })
         .from(roundAnswers)
-        .where(and(eq(roundAnswers.roundId, row.id), eq(roundAnswers.userId, userId)))
+        .innerJoin(
+          roundAsks,
+          and(eq(roundAsks.roundId, roundAnswers.roundId), eq(roundAsks.userId, roundAnswers.userId)),
+        )
+        .where(and(eq(roundAnswers.roundId, row.id), eq(roundAnswers.userId, userId), answeredSinceAsked))
         .limit(1);
       return answered === undefined ? row : undefined;
     },
@@ -412,6 +572,7 @@ export function createRounds(options: RoundsOptions) {
       const byUser = new Map(state.answers.map((a) => [a.userId, a]));
       return {
         round,
+        attemptsLeft: maxAttempts - round.attempts,
         windows: state.asks.flatMap((ask) => {
           const answer = byUser.get(ask.userId);
           return answer === undefined ? [] : [{ keyper: ask.keyper, ...answer }];

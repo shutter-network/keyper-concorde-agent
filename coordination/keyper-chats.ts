@@ -6,7 +6,12 @@
 
 import type { Users } from "@shutter-network/concorde/users";
 
-export type KeyperChat = { readonly userId: string; readonly keyper: string };
+export type KeyperChat = {
+  readonly userId: string;
+  readonly keyper: string;
+  /** The sender ids recorded as this room's operators, so they can be addressed by handle. */
+  readonly operators: readonly string[];
+};
 
 /**
  * Every keyper chat that can actually be written to, by the keyper it covers.
@@ -29,10 +34,17 @@ export async function keyperChatsByKeyper(
 ): Promise<Map<string, KeyperChat[]>> {
   const found = new Map<string, KeyperChat[]>();
   for (const user of await users.list()) {
-    const { kind, keyper } = (user.attributes ?? {}) as { kind?: string; keyper?: string };
+    const { kind, keyper, operators } = (user.attributes ?? {}) as {
+      kind?: string;
+      keyper?: string;
+      operators?: unknown;
+    };
     if (kind !== "keyper" || typeof keyper !== "string" || keyper === "") continue;
     if (!(await reachable(user.id))) continue;
-    found.set(keyper, [...(found.get(keyper) ?? []), { userId: user.id, keyper }]);
+    // Through `String`, for the same reason prompt.ts does it: Attributes are JSON a person may
+    // have edited, and a sender id written as a number would match nothing and quietly go unnamed.
+    const recorded = Array.isArray(operators) ? operators.map(String) : [];
+    found.set(keyper, [...(found.get(keyper) ?? []), { userId: user.id, keyper, operators: recorded }]);
   }
   return found;
 }
