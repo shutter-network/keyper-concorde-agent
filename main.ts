@@ -13,6 +13,9 @@ import {
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
 import { promptData } from "./prompt.ts";
+import { createAnnouncements } from "./coordination/announce.ts";
+import { createRounds, roundCompletedKind, type RoundCompleted } from "./coordination/rounds.ts";
+import { largestAgreement, overlapOf } from "./coordination/windows.ts";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
 
 const tokenTtl = 30 * 24 * 60 * 60 * 1000;
@@ -53,6 +56,15 @@ const gateway = createGateway({
     const users = createUsers({ db, agentServer, publicServer });
     const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
     const messenger = createMessenger({ db, users, worker, agentServer });
+    // Rounds: one question to every keyper chat of a keyperset, and the answers it waits for. All
+    // the counting lives here rather than in the agent, which only reads windows out of prose.
+    // A User with a keyper is not the same as a keyper that can be reached: `remove-chat` leaves
+    // the User behind, so the Channel is asked rather than assumed.
+    const reachable = async (userId: string) =>
+      (await db.tx((tx) => telegram.chatOf(tx, userId))) !== undefined;
+    const rounds = createRounds({ db, users, messenger, worker, agentServer, reachable });
+    // The other half: telling each keyper's operators something and waiting for nothing.
+    const announcements = createAnnouncements({ db, users, messenger, agentServer, reachable });
     // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
     // Groups only. Every User here is a room bound to one keyper, so a 1:1 chat has no keyper to
     // answer about and is refused before it becomes a Message.
@@ -62,12 +74,12 @@ const gateway = createGateway({
       token: process.env.TG_TOKEN!,
       chatMode: "group",
     });
-    return { users, passwordAuth, messenger, telegram };
+    return { users, passwordAuth, messenger, telegram, rounds, announcements };
   },
-  handlers: ({ db, messenger, telegram, users }) => ({
+  handlers: ({ db, messenger, telegram, users, rounds }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived from the group for keyper {{keyper}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
+        template: `A message arrived from {{#if keyper}}the group for keyper {{keyper}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}}{{#if openRound}} You asked this group for a time window for keyperset {{openRound.keyperset}} and they have not answered yet; that is round {{openRound.id}}.{{/if}} Today is {{today}}, UTC. They said:
 
 {{text}}
 
@@ -78,7 +90,18 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
           const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
           const user = await users.get(signal.payload.userId);
           telegram.expectReplyTo(signal.payload.userId, sender?.telegramMessageId ?? null);
-          return promptData(signal.payload, sender, user?.attributes);
+          // The same context, so the round routes need no ids from the agent. Both rest on one Run
+          // being in flight at a time.
+          rounds.actingFor({
+            userId: signal.payload.userId,
+            telegramMessageId: sender?.telegramMessageId ?? null,
+          });
+          return promptData(
+            signal.payload,
+            sender,
+            user?.attributes,
+            await rounds.awaiting(signal.payload.userId),
+          );
         },
       }),
       // The template handler has no failure path. Without this, a failed run is a log line
@@ -90,6 +113,80 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
             tx,
             signal.payload.userId,
             "I could not process your last message. Please try again in a few minutes.",
+          ),
+        );
+      },
+    },
+
+    // Emitted by code when the last operator answers. The overlap is worked out here, not by the
+    // model: reading "3-5pm CET" out of prose needs language, deciding whether five windows overlap
+    // does not, and a wrong answer here would name a time nobody can make.
+    [roundCompletedKind]: {
+      ...templateHandler<RoundCompleted>({
+        template: `Every operator asked about keyperset {{keyperset}} has answered.
+
+{{#each windows}}- {{keyper}} said "{{said}}", which is {{from}} to {{to}} UTC
+{{/each}}
+{{#if overlap}}All {{total}} of them overlap from {{overlap.from}} to {{overlap.to}} UTC.{{else}}{{#if agreement}}No window works for all {{total}}. The largest group that can meet is {{agreement.count}} of {{total}}, from {{agreement.from}} to {{agreement.to}} UTC: {{agreement.agreed}}. Outside it: {{agreement.outside}}.{{else}}No two of them overlap at all.{{/if}}{{/if}}
+
+Report this to user {{userId}}, in this order: every operator's window as they gave it; then {{#if overlap}}the window they all share{{else}}the largest group that can meet, when and who, and who is outside it{{/if}}.{{#unless overlap}} Then say they can open a fresh round suggesting a specific day or window, so the operators have something to converge on.{{/unless}} Times are UTC. Do not pick a time for them and do not open anything yourself; a person decides. Your final reply here reaches nobody.`,
+        session: (signal) => `round_${signal.payload.roundId}`,
+        data: async (signal) => {
+          const found = await rounds.report(signal.payload.roundId);
+          if (found === undefined) throw new Error(`no round ${signal.payload.roundId}`);
+          const entries = found.windows.map((w) => ({
+            keyper: w.keyper,
+            window: { from: w.fromAt, to: w.toAt },
+          }));
+          const overlap = overlapOf(entries.map((e) => e.window));
+          // Only when they do not all agree: "the largest group is all of them" is the overlap
+          // restated, and saying it twice would read as two different findings.
+          const agreement = overlap === undefined ? largestAgreement(entries) : undefined;
+          const agreed = new Set(agreement?.members.map((m) => m.keyper) ?? []);
+          // The report quotes the question that opened the round, however long ago that was.
+          telegram.expectReplyTo(found.round.askedByUserId, found.round.askedTelegramMessageId);
+          rounds.actingFor(undefined);
+          return {
+            userId: found.round.askedByUserId,
+            keyperset: found.round.keyperset,
+            windows: found.windows.map((w) => ({
+              keyper: w.keyper,
+              said: w.said,
+              from: w.fromAt.toISOString(),
+              to: w.toAt.toISOString(),
+            })),
+            total: entries.length,
+            overlap:
+              overlap === undefined
+                ? null
+                : { from: overlap.from.toISOString(), to: overlap.to.toISOString() },
+            agreement:
+              agreement === undefined
+                ? null
+                : {
+                    from: agreement.window.from.toISOString(),
+                    to: agreement.window.to.toISOString(),
+                    count: agreement.members.length,
+                    agreed: agreement.members.map((m) => m.keyper).join(", "),
+                    outside: entries
+                      .filter((e) => !agreed.has(e.keyper))
+                      .map((e) => e.keyper)
+                      .join(", "),
+                  },
+          };
+        },
+      }),
+      // templateHandler has no failure path, and `reportedAt` is already stamped, so without this a
+      // failed report is silence and nothing re-emits it. The state route is how they recover.
+      async post(signal: Signal<RoundCompleted>, outcome: PostOutcome) {
+        if (!outcome.failed) return;
+        const found = await rounds.report(signal.payload.roundId);
+        if (found === undefined) return;
+        await db.tx((tx) =>
+          messenger.send(
+            tx,
+            found.round.askedByUserId,
+            `Every operator answered about keyperset ${found.round.keyperset}, but I could not put the result together. Ask me where that round stands.`,
           ),
         );
       },
@@ -112,8 +209,16 @@ await gateway.start();
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {
-  const { name, keyper } = (group.attributes ?? {}) as { name?: string; keyper?: string };
-  console.log(`  ${name ?? "(unnamed)"} covers keyper ${keyper ?? "(none bound)"}`);
+  const { name, kind, keyper } = (group.attributes ?? {}) as {
+    name?: string;
+    kind?: string;
+    keyper?: string;
+  };
+  console.log(
+    kind === "teammate"
+      ? `  ${name ?? "(unnamed)"} is a teammate chat`
+      : `  ${name ?? "(unnamed)"} covers keyper ${keyper ?? "(none bound)"}`,
+  );
 }
 if (groups.length === 0) console.log("  none registered yet; see admin.ts add");
 

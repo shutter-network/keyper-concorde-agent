@@ -39,8 +39,11 @@ When the package is published, `package.json` goes back to `"^0.1.0"` and `vendo
    it as `$LOCAL_API_KEY`.
 4. If another process polls the same bot token, stop it first. Telegram hands each update to
    one poller, and the Channel logs a 409 until the other one is gone.
-5. In BotFather, `/setprivacy` → Disable. With privacy on, a bot only receives group messages
-   that @mention it or reply to it, and the agent looks dead while working exactly as designed.
+5. Leave group privacy **on** in BotFather — the default. The bot is then woken only by an
+   @mention or a reply to one of its own messages, rather than by every message in every room.
+6. In each keyper group, restrict who may post so that only the operator can. That decides who
+   *may* write; `add-operator` records *which sender id* they are, so the agent can be told whether
+   an operator or a teammate wrote.
 
 ## Run
 
@@ -54,8 +57,15 @@ arrives. Register a group as below, then write in it and the reply comes back to
 
 ## Groups
 
-One Telegram group is one user is one keyper. Everyone in the group — the keyper's operator and
-their teammates — asks about that one keyper, and every reply reaches all of them.
+A room is one user. A **keyper room** covers one keyper and only its operator writes there;
+teammates are in it and read. The **teammate chat** covers none, holds teammates, and any keyper may
+be asked about. Every reply reaches everyone in the room it is sent to.
+
+Two separate things decide the operator. Telegram's posting permission decides who **may** write in
+a keyper room; `add-operator` records **which sender id** that human is, so the agent can be told
+whether an operator or a teammate wrote. A room whose permissions are wrong, or a teammate made
+admin, would be read as the operator — the same kind of soft boundary as the keyper scope, not a
+control.
 
 **Private 1:1 chats are not served.** `main.ts` pins the Channel to groups, so a direct message
 is answered once with "This agent answers in group chats only, and not in direct messages" and
@@ -67,24 +77,25 @@ registers the group. `admin.ts` does the rest, against the database, with or wit
 running:
 
 ```sh
-docker compose run --rm --no-deps gateway node admin.ts list
-docker compose run --rm --no-deps gateway node admin.ts add <name> <chatId> <keyper> [operatorSenderId]
-docker compose run --rm --no-deps gateway node admin.ts members <chatId>
-docker compose run --rm --no-deps gateway node admin.ts operator-add <chatId> <senderId>
-docker compose run --rm --no-deps gateway node admin.ts operator-remove <chatId> <senderId>
-docker compose run --rm --no-deps gateway node admin.ts attach <userId> <chatId>
-docker compose run --rm --no-deps gateway node admin.ts detach <chatId>
+docker compose run --rm --no-deps gateway node admin.ts list-chats
+docker compose run --rm --no-deps gateway node admin.ts add-keyper-chat <name> <chatId> <keyper> [operatorSenderId]
+docker compose run --rm --no-deps gateway node admin.ts add-teammate-chat <name> <chatId>
+docker compose run --rm --no-deps gateway node admin.ts list-members <chatId>
+docker compose run --rm --no-deps gateway node admin.ts add-operator <chatId> <senderId>
+docker compose run --rm --no-deps gateway node admin.ts remove-operator <chatId> <senderId>
+docker compose run --rm --no-deps gateway node admin.ts attach-chat <userId> <chatId>
+docker compose run --rm --no-deps gateway node admin.ts remove-chat <chatId>
 ```
 
 | command | what it does |
 |---|---|
-| `list` | one line per group: chat id, name, keyper, operators, user id |
-| `add` | creates the user, names it, binds its keyper and attaches the chat, in one transaction, so a group nobody can reach never exists. The optional fourth argument is the operator's sender id, which the enrolment reply already gave you. |
-| `members` | everyone who has written to that group — sender id, `@handle` or first name, role, when — plus any recorded operator who has not written yet |
-| `operator-add` | records a sender id as an operator. Warns if they have never written there, but records them anyway |
-| `operator-remove` | drops one |
-| `attach` | gives an existing user a chat. The only command taking a **user id**, which `list` prints last, because you reach for it exactly when the chat id is wrong or missing |
-| `detach` | removes the chat only: the framework removes no user, and the message log stays |
+| `list-chats` | one line per chat: chat id, kind, name, what it covers, operators, user id |
+| `add-keyper-chat` | creates a **keyper chat**: one keyper, written in only by its operator. One transaction, so a chat nobody can reach never exists. |
+| `add-teammate-chat` | creates a **teammate chat**: no keyper, written in by teammates, any keyper may be asked about. Its own command so the kind is typed rather than arrived at by omitting an argument. |
+| `list-members` | everyone who has written to that room — sender id, `@handle` or first name, role, when — plus any recorded operator who has not written. A reader is invisible: Telegram names a sender only on a message. |
+| `add-operator` / `remove-operator` | records which sender id is the operator. Warns if they have never written there, but records them anyway. |
+| `attach-chat` | gives an existing user a chat. The only command taking a **user id**, which `list-chats` prints last, because you reach for it exactly when the chat id is wrong or missing |
+| `remove-chat` | removes the chat only: the framework removes no user, and the message log stays. Names the kind and name of what it removed, so a mistyped id is visible in the output. |
 
 The keyper is the Grafana `instance` label and **nothing validates it** — a typo registers
 cleanly and then answers "no series" forever.
@@ -92,9 +103,26 @@ cleanly and then answers "no series" forever.
 Roles carry no privilege. The agent answers an operator and a teammate identically; the label
 exists so it can name who runs the keyper, and so the log carries that afterwards.
 
-Telegram changes a group's id when it upgrades a basic group to a supergroup. Recovery is
-`detach`, then `attach <userId>` with the new id — not `add`, which would build a second user and
-strand the log, the keyper and the operators on the first.
+### One chat per keyper, and moving it
+
+A keyper has exactly **one** chat, and `add-keyper-chat` **refuses** a second. Two chats would both
+be written to by every fan-out, and a round would wait for an answer from each — so one dead room
+would stop a round ever completing.
+
+**To move a keyper to a different group, do not register it again.** `add-keyper-chat` creates a
+*new* user, stranding the old one's message log, its recorded operators and its history. Move it
+instead — the refusal prints the two commands with the ids already filled in:
+
+```sh
+admin.ts list-chats                     # note the user id, last column
+admin.ts remove-chat <oldChatId>
+admin.ts attach-chat <userId> <newChatId>
+```
+
+The user, its keyper, its operators and its whole log come with it.
+
+This is also the recovery when **Telegram changes a group's id** on upgrading a basic group to a
+supergroup: the cause differs, the fix does not.
 
 ## Tests
 

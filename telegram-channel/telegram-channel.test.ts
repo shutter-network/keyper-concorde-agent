@@ -623,6 +623,28 @@ describe("quoting the question", () => {
     });
   });
 
+  // What a fan-out relies on: a Run woken by one chat writes to another, and that other chat may
+  // well carry a target from a Run of its own earlier. Scoping the target to the Run is what stops
+  // the message arriving as a reply to something unrelated.
+  it("does not quote in a chat this Run was not woken by", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const asked = await admit(channel);
+      const woken = await admit(channel);
+
+      // `asked` answered something of its own earlier, and still holds that target.
+      channel.expectReplyTo(asked.userId, "4242");
+      // A later Signal, claimed for a different chat, is what the Run in flight now answers.
+      channel.expectReplyTo(woken.userId, "77");
+
+      await db.tx((tx) => messenger.send(tx, asked.userId, "a question from elsewhere"));
+      await db.tx((tx) => messenger.send(tx, woken.userId, "the answer"));
+      await waitUntil("both arrived", () => sentTo(api, asked.chatId).length + sentTo(api, woken.chatId).length === 2);
+
+      assert.equal(sentTo(api, asked.chatId)[0].replyTo, undefined, "the fanned-out chat must not quote");
+      assert.equal(sentTo(api, woken.chatId)[0].replyTo, "77", "the woken chat still quotes");
+    });
+  });
+
   it("forgets a target when told there is none", async () => {
     await withDeployment(async ({ api, messenger, channel }) => {
       const { userId, chatId } = await admit(channel);

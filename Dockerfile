@@ -10,5 +10,6 @@ RUN npm install --no-audit --no-fund
 
 COPY main.ts admin.ts prompt.ts prompt.test.ts drizzle.config.ts schema.ts tsconfig.json ./
 COPY telegram-channel ./telegram-channel
+COPY coordination ./coordination
 
 CMD ["node", "main.ts"]
