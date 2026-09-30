@@ -9,9 +9,12 @@ Built from `examples/00_minimal` of `shutter-network/concorde` at commit `e3f746
 - `telegram-channel/`, a Channel for the Telegram Bot API, written against the Messenger's
   Channel contract and modelled on the framework's Nostr Channel. It replaces the HTTP Channel.
   Meant to move into Concorde as `@shutter-network/concorde/telegram-channel` once it has run.
+- `coordination/`, what a teammate chat can set in motion across every keyper room at once:
+  rounds, which ask every operator of a keyperset for a time window and work out the overlap, and
+  announcements, which tell each keyper's operators their own number and wait for nothing.
 - `main.ts` forwards whichever provider keys are set instead of requiring the Anthropic one,
-  mounts `models.json` into the agent container, and attaches the tester's chat to the seeded
-  user at boot.
+  and mounts `models.json` into the agent container. Nothing is seeded and no chat is attached at
+  boot: every room is registered with `admin.ts`.
 - `settings.json` and `models.json` point pi at an OpenAI-compatible endpoint of your choice.
   Both are per machine, copied from their `.example` files and never committed.
 - `AGENTS.md` adds the Grafana dashboard instructions.
@@ -124,19 +127,92 @@ The user, its keyper, its operators and its whole log come with it.
 This is also the recovery when **Telegram changes a group's id** on upgrading a basic group to a
 supergroup: the cause differs, the fix does not.
 
+## Coordination
+
+A keyper room is one operator and one keyper. The **teammate chat** is the only room that can reach
+all of them at once, and there are two ways it can:
+
+**Announcements** — `POST /announce`. One message per keyper, each with its own text, so a per-keyper
+number reaches the operators it concerns and nobody else. Nothing is waited for and nothing is
+recorded beyond the Messages themselves; the message log is already the durable record. Ask in the
+teammate chat for the 7-day uptime of a keyperset and each room is told its own figure.
+
+**Rounds** — asking every operator of a keyperset for a time window, and working out whether they
+overlap. The split matters: the model composes the question, recognises that a reply is an answer,
+and reads a UTC window out of prose. Everything countable is in code — who was asked, who has
+answered, whether that is all of them, whether the windows meet, and reporting exactly once. A model
+that owned completeness would leave a round hanging or report it twice, and nothing would catch
+either.
+
+| route | what it does |
+|---|---|
+| `POST /rounds` | opens a round and asks every keyper in the set. A keyperset with a round already open opens nothing and sends nothing — a second round would make an operator's reply ambiguous |
+| `POST /rounds/:id/answers` | records one operator's window. When it is the last one outstanding, the round completes on its own |
+| `POST /rounds/:id/revise` | asks named operators to move. Bounded at **3 attempts**, because every attempt asks somebody who already answered to change their plans |
+| `POST /rounds/:id/close` | gives up on a round so its keyperset can be asked again. A person's judgement, never automatic |
+| `GET /rounds` | where the open rounds stand: who has answered, who is still owed |
+
+A completed round **reports and closes itself**. Nobody has to say a finished round is finished —
+closing is only for one that has gone dead. When the windows do not all meet, the round names the
+largest group that can meet and who falls outside it, and asks those operators to move toward it;
+after the third attempt it reports what it has rather than asking again.
+
+Which chat asked is taken from the Signal that woke the Run, never from the agent, which rests on the
+Signal Worker being globally serial — one Run in flight at a time.
+
+### Addressing the operator
+
+A reply quotes the message it answers, so the room can see who is being answered. Nothing here has a
+message to quote: a fan-out and a round's question both arrive unprompted. So each keyper room's
+recorded operators are **@mentioned on a line of its own** above the text:
+
+```
+@someoperator
+Your 7-day uptime is 99.89%.
+```
+
+The handle comes from the last message that operator was seen writing. Three things follow from that,
+all deliberate:
+
+- **A room with no handle on file is written to exactly as before**, and nobody is told anything about
+  it. Under group privacy the bot only sees an @mention or a reply to itself, so an operator recorded
+  from the enrollment reply and silent since has no handle at all — that is the ordinary case at
+  first, not an edge one.
+- **The latest handle wins and an older one is never fallen back to.** Someone whose most recent
+  message carried no username is left unaddressed rather than reached for under a handle they have
+  given up, which would ping a stranger or nobody.
+- **It is plain text, with no `parse_mode`.** Telegram links a bare `@handle` itself. Turning on HTML
+  or MarkdownV2 would put every `<`, `&` and `_` the agent writes at risk of being mangled or
+  refused, which is far too much to pay for a mention.
+
+The agent does not write handles itself; the addressing is added by the routes.
+
 ## Tests
 
-`telegram-channel/telegram-channel.test.ts` runs the Channel against a real PostgreSQL and a
-fake Bot API on localhost (`fake-bot-api.ts`): recording chats, inbound texts and redelivery,
-unknown chats, outbound replies, refusals, transient failures, splitting, a reply queued while
-stopped, a 409 from a second poller, stop and start. The helpers in `test-support.ts` mirror
-the framework's own.
+Every test runs against a **real PostgreSQL** — each file creates and drops its own database, and
+nothing about the database is mocked. There is no test framework and no assertion library beyond
+`node:assert/strict`.
+
+| file | what it covers |
+|---|---|
+| `telegram-channel/telegram-channel.test.ts` | the Channel against a fake Bot API on localhost (`fake-bot-api.ts`): recording chats, inbound texts and redelivery, unknown chats, outbound replies, refusals, transient failures, splitting, a reply queued while stopped, a 409 from a second poller, stop and start, and resolving a sender's handle |
+| `coordination/rounds.test.ts` | opening a round, recording answers, completing, reporting, revising within the bound, closing, fan-out announcements, a keyper whose chat was removed, and the operator addressing |
+| `coordination/windows.test.ts` | the window arithmetic: parsing, overlap, and the largest group that can agree |
+| `coordination/mentions.test.ts` | resolving handles and the fallback when there are none |
+| `prompt.test.ts` | what the agent is told about one Message, including the operator/teammate role |
+
+The helpers in `test-support.ts` mirror the framework's own. Async assertions go through
+`waitUntil(description, condition)` rather than a bare sleep, so a timeout says what it was waiting
+for.
 
 Against the stack's database, without starting the gateway:
 
 ```sh
-docker compose run --rm test
+docker compose run --rm --build test
 ```
+
+`--build` matters: without it the image keeps whatever source it was last built with, and a change
+you have just made is silently not the one under test.
 
 Or anywhere with Node 24 and a PostgreSQL to create databases on:
 
@@ -174,10 +250,11 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 
 | file | role |
 |---|---|
-| `main.ts` | the deployment: runtime, components, handler, seeding |
+| `main.ts` | the deployment: runtime, components, the two handlers and their failure paths |
 | `admin.ts` | registering groups, their keyper and their operators |
 | `prompt.ts` | what the agent is told about one Message, assembled and testable |
 | `telegram-channel/` | the Telegram Channel: schema, chats, outbox, Bot API, channel |
+| `coordination/` | rounds, announcements, window arithmetic, and addressing a room's operator |
 | `compose.yml` | gateway, migrate, postgres, agent image |
 | `AGENTS.md` | the agent's instructions, mounted read-only |
 | `settings.json`, `models.json` | pi's model configuration, mounted read-only |
