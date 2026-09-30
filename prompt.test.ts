@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
-import { promptData, roleOf, UnboundGroupError } from "./prompt.ts";
+import { promptData, roleOf, UnboundGroupError, UnknownGroupKindError } from "./prompt.ts";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
 const operator = "874974777";
@@ -28,7 +28,13 @@ const message: MessageRecord = {
   createdAt: new Date().toISOString(),
 };
 
-const bound = { name: "Ops kpr-jstcz", keyper: "kpr-jstcz", operators: [operator] };
+const keyperChat = {
+  kind: "keyper",
+  name: "Ops kpr-jstcz",
+  keyper: "kpr-jstcz",
+  operators: [operator],
+};
+const teammateChat = { kind: "teammate", name: "Shutter team" };
 
 describe("telling an operator from a teammate", () => {
   it("knows the operator", () => {
@@ -39,8 +45,9 @@ describe("telling an operator from a teammate", () => {
     assert.equal(roleOf(senderOf(teammate, "bob"), [operator]), "a teammate");
   });
 
-  // A group nobody has been labelled in yet still works; everyone in it is simply a teammate.
-  it("calls everyone a teammate while no operator is recorded", () => {
+  // Telegram already stops a teammate writing in a keyper chat, so this is the not-yet-recorded
+  // operator rather than a stranger: they read as a teammate until `operator-add` says otherwise.
+  it("calls a writer a teammate while no operator is recorded", () => {
     assert.equal(roleOf(senderOf(operator, "alice"), []), "a teammate");
   });
 
@@ -55,29 +62,41 @@ describe("telling an operator from a teammate", () => {
 });
 
 describe("assembling the prompt's values", () => {
-  it("carries the keyper, the writer and their role", () => {
-    // No username, no first name, no id: naming the room's members is not the model's business,
-    // and the answer is attached to the question instead.
-    assert.deepEqual(promptData(message, senderOf(operator, "alice", "Alice"), bound), {
+  it("names the keyper a keyper chat covers, and the writer's role", () => {
+    assert.deepEqual(
+      promptData(message, senderOf(operator, "alice", "Alice"), keyperChat),
+      {
+        userId: message.userId,
+        text: "how is it doing",
+        keyper: "kpr-jstcz",
+        role: "the operator",
+      },
+    );
+  });
+
+  // No keyper, and nobody in it is an operator, so everyone who writes there is a teammate.
+  it("names no keyper for a teammate chat, and calls its writer a teammate", () => {
+    assert.deepEqual(promptData(message, senderOf(teammate, "bob"), teammateChat), {
       userId: message.userId,
       text: "how is it doing",
-      keyper: "kpr-jstcz",
-      role: "the operator",
+      keyper: null,
+      role: "a teammate",
     });
   });
 
-  it("supplies the role as null rather than leaving it out", () => {
-    const data = promptData(message, undefined, bound);
-    assert.equal(data.role, null);
+  it("supplies every key the template names, even when null", () => {
     // Handlebars runs strict here: a key the template names and this omits fails the Signal.
+    const data = promptData(message, undefined, teammateChat);
+    assert.equal(data.role, null);
     assert.deepEqual(Object.keys(data).sort(), ["keyper", "role", "text", "userId"]);
   });
 
-  // The whole point of dropping the writer: a handle must not reach the model through the values
-  // this builds. One written into the message text still does, and cannot be helped here.
+  // A handle must not reach the model through the values this builds. One written into the message
+  // text still does, and cannot be helped here.
   it("carries no username, first name or sender id anywhere", () => {
-    const data = promptData(message, senderOf(operator, "alice", "Alice"), bound);
-    const rendered = JSON.stringify(data);
+    const rendered = JSON.stringify(
+      promptData(message, senderOf(operator, "alice", "Alice"), keyperChat),
+    );
     for (const leak of ["alice", "Alice", operator]) {
       assert.equal(rendered.includes(leak), false, `${leak} reached the prompt values`);
     }
@@ -87,7 +106,7 @@ describe("assembling the prompt's values", () => {
   // as a number is the likeliest way to write one.
   it("knows an operator whose id was written as a number", () => {
     const data = promptData(message, senderOf(operator, "alice"), {
-      keyper: "kpr-jstcz",
+      ...keyperChat,
       operators: [Number(operator)],
     });
     assert.equal(data.role, "the operator");
@@ -95,21 +114,34 @@ describe("assembling the prompt's values", () => {
 
   it("survives operators that are not a list at all", () => {
     for (const operators of ["874974777", 874974777, null, {}]) {
-      const data = promptData(message, senderOf(operator, "alice"), { keyper: "kpr-jstcz", operators });
+      const data = promptData(message, senderOf(operator, "alice"), { ...keyperChat, operators });
       assert.equal(data.role, "a teammate");
     }
   });
 
-  it("treats missing operators as an empty list", () => {
-    const data = promptData(message, senderOf(operator, "alice"), { keyper: "kpr-jstcz" });
-    assert.equal(data.role, "a teammate");
+  // A keyper chat with no keyper would answer about nothing, which is worse than failing: the
+  // Handler's post phase tells the chat its message could not be processed.
+  it("refuses a keyper chat bound to no keyper", () => {
+    for (const keyper of [undefined, "", null, 42]) {
+      assert.throws(() => promptData(message, undefined, { kind: "keyper", keyper }), UnboundGroupError);
+    }
   });
 
-  // A group with no keyper is a hand-edited row, and answering about nothing is worse than failing:
-  // the Handler's post phase tells the room the message could not be processed.
-  it("refuses a group bound to no keyper", () => {
-    for (const attributes of [null, undefined, {}, { keyper: "" }, { name: "Ops" }, "nonsense"]) {
-      assert.throws(() => promptData(message, undefined, attributes), UnboundGroupError);
+  // An unreadable kind must not fall back to either: a teammate chat carries the licence to message
+  // every operator, and a hand-edited row must not be able to grant it.
+  it("refuses a chat whose kind it cannot read", () => {
+    for (const attributes of [null, undefined, {}, "nonsense", { kind: "keyperr" }, { keyper: "kpr-jstcz" }]) {
+      assert.throws(() => promptData(message, undefined, attributes), UnknownGroupKindError);
     }
+  });
+
+  // Not refused for carrying one: admin.ts will not create one, and the chat otherwise works.
+  it("ignores a stray keyper on a teammate chat", () => {
+    const data = promptData(message, senderOf(teammate, "bob"), {
+      kind: "teammate",
+      keyper: "kpr-jstcz",
+    });
+    assert.equal(data.keyper, null);
+    assert.equal(data.role, "a teammate");
   });
 });

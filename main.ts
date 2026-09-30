@@ -67,7 +67,7 @@ const gateway = createGateway({
   handlers: ({ db, messenger, telegram, users }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived from the group for keyper {{keyper}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
+        template: `A message arrived from {{#if keyper}}the group for keyper {{keyper}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
 
 {{text}}
 
@@ -112,10 +112,18 @@ await gateway.start();
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {
-  const { name, keyper } = (group.attributes ?? {}) as { name?: string; keyper?: string };
-  console.log(`  ${name ?? "(unnamed)"} covers keyper ${keyper ?? "(none bound)"}`);
+  const { name, kind, keyper } = (group.attributes ?? {}) as {
+    name?: string;
+    kind?: string;
+    keyper?: string;
+  };
+  console.log(
+    kind === "teammate"
+      ? `  ${name ?? "(unnamed)"} is a teammate chat`
+      : `  ${name ?? "(unnamed)"} covers keyper ${keyper ?? "(none bound)"}`,
+  );
 }
-if (groups.length === 0) console.log("  none registered yet; see admin.ts add");
+if (groups.length === 0) console.log("  none registered yet; see admin.ts add-keyper-chat");
 
 for (const stopping of ["SIGINT", "SIGTERM"] as const) {
   process.once(stopping, () => void gateway.stop());
