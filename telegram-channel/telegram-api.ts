@@ -38,6 +38,13 @@ export class TelegramApiError extends Error {
 
 export const maxTextLength = 4096;
 
+export type SendOptions = {
+  /** Skip this many leading chunks; used to resume a partially delivered reply. Default 0. */
+  readonly fromChunk?: number;
+  /** Called after each accepted chunk that is not the last, with the count sent so far. */
+  readonly onChunkSent?: (sentParts: number) => Promise<void>;
+};
+
 export function createTelegramApi(token: string, baseUrl = "https://api.telegram.org") {
   const root = `${baseUrl}/bot${token}`;
 
@@ -75,9 +82,18 @@ export function createTelegramApi(token: string, baseUrl = "https://api.telegram
       return call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message"] }, bounded);
     },
 
-    async sendMessage(chatId: string, text: string, signal: AbortSignal): Promise<void> {
-      for (const chunk of chunks(text)) {
-        await call("sendMessage", { chat_id: chatId, text: chunk }, signal);
+    async sendMessage(
+      chatId: string,
+      text: string,
+      signal: AbortSignal,
+      options: SendOptions = {},
+    ): Promise<void> {
+      const parts = chunks(text);
+      for (let i = options.fromChunk ?? 0; i < parts.length; i += 1) {
+        await call("sendMessage", { chat_id: chatId, text: parts[i] }, signal);
+        // Persist progress only between chunks. The final chunk needs none, because the caller
+        // deletes the outbox row on success, so a single-chunk reply costs no extra write.
+        if (i + 1 < parts.length) await options.onChunkSent?.(i + 1);
       }
     },
   };

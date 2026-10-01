@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { bigint, integer, pgSchema, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import { users } from "@shutter-network/concorde/users/schema";
 
 export const telegramChannelSchema = pgSchema("keyper_telegram_channel");
@@ -39,6 +39,10 @@ export const outbox = telegramChannelSchema.table("outbox", {
     .notNull()
     .default(sql`clock_timestamp()`),
   failedAt: timestamp("failed_at", { withTimezone: true }),
+  // How many leading chunks of a split reply Telegram has already accepted, so a retry after a
+  // transient mid-send failure resumes from the next chunk instead of re-sending from the first.
+  // Only advanced for non-final chunks; a single-chunk reply never writes it.
+  sentParts: integer("sent_parts").notNull().default(0),
 });
 
 export const telegramChannelTables = { chats, received, outbox };
