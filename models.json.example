@@ -1,8 +1,8 @@
 {
   "providers": {
     "local": {
-      "baseUrl": "https://YOUR_ENDPOINT/v1",
-      "apiKey": "$LOCAL_API_KEY",
+      "baseUrl": "http://litellm:4000/v1",
+      "apiKey": "not-a-real-key",
       "api": "openai-completions",
       "models": [
         {
@@ -12,6 +12,9 @@
           "maxTokens": 16384
         }
       ]
+    },
+    "anthropic": {
+      "baseUrl": "http://litellm:4000"
     }
   }
 }
