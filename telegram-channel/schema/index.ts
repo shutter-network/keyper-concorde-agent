@@ -34,6 +34,8 @@ export const outbox = telegramChannelSchema.table("outbox", {
     .references(() => users.id),
   chatId: text("chat_id").notNull(),
   text: text("text").notNull(),
+  // The Telegram message being answered, so the group can see which question this reply addresses.
+  replyTo: text("reply_to"),
   reason: text("reason"),
   queuedAt: timestamp("queued_at", { withTimezone: true })
     .notNull()
@@ -41,4 +43,21 @@ export const outbox = telegramChannelSchema.table("outbox", {
   failedAt: timestamp("failed_at", { withTimezone: true }),
 });
 
-export const telegramChannelTables = { chats, received, outbox };
+// Store Telegram sender details, chat details and message ID for each incoming Message.
+// Save them in the same transaction as the Message. A null sender means Telegram did not
+// identify the sender. Keep the chat type to show whether the User represents a group,
+// where several people can send messages, or a private chat.
+export const senders = telegramChannelSchema.table("senders", {
+  messageId: uuid("message_id").primaryKey(),
+  senderId: text("sender_id"),
+  username: text("username"),
+  firstName: text("first_name"),
+  chatId: text("chat_id").notNull(),
+  chatType: text("chat_type").notNull(),
+  telegramMessageId: text("telegram_message_id").notNull(),
+  recordedAt: timestamp("recorded_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+
+export const telegramChannelTables = { chats, received, outbox, senders };

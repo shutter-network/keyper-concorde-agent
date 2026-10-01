@@ -6,7 +6,13 @@ export type TelegramUpdate = {
     readonly message_id: number;
     readonly text?: string;
     readonly chat: { readonly id: number; readonly type: string };
-    readonly from?: { readonly id: number; readonly username?: string };
+    // Telegram requires first_name but makes username optional. Treat first_name as optional
+    // here too because the API response is cast to this type without runtime validation.
+    readonly from?: {
+      readonly id: number;
+      readonly username?: string;
+      readonly first_name?: string;
+    };
   };
 };
 
@@ -75,9 +81,33 @@ export function createTelegramApi(token: string, baseUrl = "https://api.telegram
       return call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message"] }, bounded);
     },
 
-    async sendMessage(chatId: string, text: string, signal: AbortSignal): Promise<void> {
+    // Use `replyTo` to quote the original question on the first part of an answer.
+    // Long answers are uncommon, and another message is unlikely to arrive between their parts.
+    // Quoting only the first part avoids repeating the question throughout the chat.
+    //
+    // Set `allow_sending_without_reply` so the answer can still be sent if the original question
+    // has been deleted. Otherwise, Telegram returns a 4xx error that this Channel treats as
+    // permanent, and the answer would never be delivered.
+    async sendMessage(
+      chatId: string,
+      text: string,
+      signal: AbortSignal,
+      replyTo?: string,
+    ): Promise<void> {
+      let quote = replyTo;
       for (const chunk of chunks(text)) {
-        await call("sendMessage", { chat_id: chatId, text: chunk }, signal);
+        await call(
+          "sendMessage",
+          {
+            chat_id: chatId,
+            text: chunk,
+            ...(quote === undefined
+              ? {}
+              : { reply_to_message_id: Number(quote), allow_sending_without_reply: true }),
+          },
+          signal,
+        );
+        quote = undefined;
       }
     },
   };

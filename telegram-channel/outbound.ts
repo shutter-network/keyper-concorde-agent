@@ -21,6 +21,7 @@ export type Queued = {
   readonly userId: string;
   readonly chatId: string;
   readonly text: string;
+  readonly replyTo: string | null;
 };
 
 export async function queueText<TSchema extends Record<string, unknown>>(
