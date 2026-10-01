@@ -86,7 +86,7 @@ export function createTelegramApi(token: string, baseUrl = "https://api.telegram
     // quoting on every chunk would repeat the question down the room.
     //
     // `allow_sending_without_reply` because the question may have been deleted by the time the
-    // answer is ready, and Telegram refuses the send outright otherwise -- a 4xx this Channel reads
+    // answer is ready. Telegram refuses the send outright otherwise, with a 4xx this Channel reads
     // as permanent, which would drop the answer rather than the quote.
     async sendMessage(
       chatId: string,

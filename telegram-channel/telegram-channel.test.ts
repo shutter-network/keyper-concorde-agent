@@ -382,7 +382,7 @@ describe("sender metadata", () => {
       const [message] = await messenger.history(userId);
 
       // The poll offset lives in the poll loop, so a restart forgets it and Telegram's redelivery
-      // really reaches the Channel a second time -- which is what `received` exists to absorb.
+      // really reaches the Channel a second time. That is what `received` exists to absorb.
       await channel.stop();
       api.push(update);
       api.push(updateFrom(chatId, "sent after", { id: 555 }));

@@ -54,8 +54,8 @@ const gateway = createGateway({
     const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
     const messenger = createMessenger({ db, users, worker, agentServer });
     // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
-    // Groups only. Every User here is a room bound to one keyper, so a 1:1 chat has no keyper to
-    // answer about and is refused before it becomes a Message.
+    // Groups only: a 1:1 chat has no keyper to answer about, and is refused before it becomes a
+    // Message.
     const telegram = createTelegramChannel({
       db,
       messenger,
@@ -73,7 +73,7 @@ const gateway = createGateway({
 
 Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`,
         session: (signal) => `user_${signal.payload.userId}`,
-        // The reads, so that assembling the values stays pure and testable in prompt.ts.
+        // The reads live here so assembling the values stays pure and testable in prompt.ts.
         data: async (signal) => {
           const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
           const user = await users.get(signal.payload.userId);
@@ -81,8 +81,8 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
           return promptData(signal.payload, sender, user?.attributes);
         },
       }),
-      // The template handler has no failure path. Without this, a failed run is a log line
-      // and the sender hears nothing.
+      // The template handler has no failure path. Without this a failed Run is one log line and
+      // the sender hears nothing.
       async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
         if (!outcome.failed) return;
         await db.tx((tx) =>
@@ -99,16 +99,9 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
 
 await gateway.start();
 
-// Nothing is seeded. A User here is a group bound to a keyper, and one with neither chat nor keyper
-// could receive nothing and answer about nothing. `admin.ts add` is the only place a group is made,
-// and the only place a chat and its keyper are recorded together.
-//
-// Password Auth is still built, so the Public server's User routes keep the hook that refuses them.
-// Nobody holds a password, so nobody logs in, which is what a deployment reached only over Telegram
-// wants.
-//
-// One line at boot, because the framework says nothing until something happens, and a silent log
-// otherwise reads the same whether the gateway is idle or never came up.
+// Nothing is seeded. A User with no chat and no keyper could receive nothing and answer about
+// nothing, so `admin.ts` is the only place a group is made and the only place its chat and keyper
+// are recorded together.
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {

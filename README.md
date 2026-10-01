@@ -39,7 +39,7 @@ When the package is published, `package.json` goes back to `"^0.1.0"` and `vendo
    it as `$LOCAL_API_KEY`.
 4. If another process polls the same bot token, stop it first. Telegram hands each update to
    one poller, and the Channel logs a 409 until the other one is gone.
-5. Leave group privacy **on** in BotFather — the default. The bot is then woken only by an
+5. Keep group privacy **on** in BotFather. The bot is then woken only by an
    @mention or a reply to one of its own messages, rather than by every message in every room.
 6. In each keyper group, restrict who may post so that only the operator can. That decides who
    *may* write; `add-operator` records *which sender id* they are, so the agent can be told whether
@@ -64,8 +64,7 @@ be asked about. Every reply reaches everyone in the room it is sent to.
 Two separate things decide the operator. Telegram's posting permission decides who **may** write in
 a keyper room; `add-operator` records **which sender id** that human is, so the agent can be told
 whether an operator or a teammate wrote. A room whose permissions are wrong, or a teammate made
-admin, would be read as the operator — the same kind of soft boundary as the keyper scope, not a
-control.
+admin, would be read as the operator. It is a soft boundary like the keyper scope, not a control.
 
 **Private 1:1 chats are not served.** `main.ts` pins the Channel to groups, so a direct message
 is answered once with "This agent answers in group chats only, and not in direct messages" and
@@ -92,16 +91,23 @@ docker compose run --rm --no-deps gateway node admin.ts remove-chat <chatId>
 | `list-chats` | one line per chat: chat id, kind, name, what it covers, operators, user id |
 | `add-keyper-chat` | creates a **keyper chat**: one keyper, written in only by its operator. One transaction, so a chat nobody can reach never exists. |
 | `add-teammate-chat` | creates a **teammate chat**: no keyper, written in by teammates, any keyper may be asked about. Its own command so the kind is typed rather than arrived at by omitting an argument. |
-| `list-members` | everyone who has written to that room — sender id, `@handle` or first name, role, when — plus any recorded operator who has not written. A reader is invisible: Telegram names a sender only on a message. |
+| `list-members` | everyone who has written to that room: sender id, `@handle` or first name, role, when. Plus any recorded operator who has not written. A reader is invisible: Telegram names a sender only on a message. |
 | `add-operator` / `remove-operator` | records which sender id is the operator. Warns if they have never written there, but records them anyway. |
 | `attach-chat` | gives an existing user a chat. The only command taking a **user id**, which `list-chats` prints last, because you reach for it exactly when the chat id is wrong or missing |
 | `remove-chat` | removes the chat only: the framework removes no user, and the message log stays. Names the kind and name of what it removed, so a mistyped id is visible in the output. |
 
-The keyper is the Grafana `instance` label and **nothing validates it** — a typo registers
+The keyper is the Grafana `instance` label and **nothing validates it**. A typo registers
 cleanly and then answers "no series" forever.
 
 Roles carry no privilege. The agent answers an operator and a teammate identically; the label
 exists so it can name who runs the keyper, and so the log carries that afterwards.
+
+**What a question may be about follows the room, not the role.** In a keyper room the agent answers
+about that room's keyper only, and a question about another is turned back with the name of the
+keyper this room covers. In the teammate chat it answers about whichever keyper the question names,
+and asks which one if the question names none. So the same person asking the same question gets an
+answer in one room and a redirection in the other. The room decides, not who they are. That scope
+is **soft**: it is an instruction in `AGENTS.md` and nothing more.
 
 ### One chat per keyper, and moving it
 
@@ -111,7 +117,7 @@ say which one is the keyper's.
 
 **To move a keyper to a different group, do not register it again.** `add-keyper-chat` creates a
 *new* user, stranding the old one's message log, its recorded operators and its history. Move it
-instead — the refusal prints the two commands with the ids already filled in:
+instead. The refusal prints the two commands with the ids already filled in:
 
 ```sh
 admin.ts list-chats                     # note the user id, last column
@@ -123,6 +129,23 @@ The user, its keyper, its operators and its whole log come with it.
 
 This is also the recovery when **Telegram changes a group's id** on upgrading a basic group to a
 supergroup: the cause differs, the fix does not.
+
+## Coordination
+
+The teammate chat can set two things in motion across every keyper room. A keyper room cannot ask
+for either; the agent turns it back.
+
+**Announcements.** One message to each keyper's own room, and nothing is waited for. Name a
+keyperset and the agent works out its members from the dashboard's `deployment` label, then writes
+only to those rooms. A keyper outside the set is not written to, and one with no room is named back
+to you so a short fan-out is visible.
+
+**Rounds.** Ask every operator of a keyperset for a time window. The agent asks each room, collects
+the replies as they come, and reports to the teammate chat once all of them are in. If the windows
+do not all overlap it says so and asks what to do; it never picks a time itself.
+
+Both are driven entirely by `AGENTS.md`. The agent uses `GET /users/` to find the rooms, 
+`POST /messages/` to write, and keeps round state in a file at `/workspace/coordination.json`.
 
 ## Tests
 

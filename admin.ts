@@ -9,29 +9,24 @@
 //   docker compose run --rm --no-deps gateway node admin.ts add-operator <chatId> <senderId>
 //   docker compose run --rm --no-deps gateway node admin.ts remove-operator <chatId> <senderId>
 //
-// A chat is either a **keyper chat**, covering one keyper and written in only by its operator, or a
-// **teammate chat**, covering all and written in by teammates. Which it is, is written down rather
-// than inferred: a teammate chat is the only one that may ask about every keyper at once, and a chat
-// must not drift into holding that licence. `add-keyper-chat` and `add-teammate-chat` each create
-// the User, name it, attach the chat and record the kind in one transaction, so a chat nobody can
-// reach never exists.
+// A chat is either a **keyper chat**, covering one keyper, or a **teammate chat**, covering none.
+// The kind is written down, never inferred. Only a teammate chat may ask about every keyper at once,
+// and a chat must not drift into holding that. Both add commands create the User, name it, attach
+// the chat and record the kind in one transaction, so a chat nobody can reach never exists.
 //
-// `remove-chat` removes the chat and nothing else: the framework removes no User, and their message
-// log stays. It serves both kinds and names what it removed, so a mistyped id is visible in the
-// output rather than silent.
+// `remove-chat` removes the chat and nothing else. The framework removes no User and the message log
+// stays. It names what it removed, so a mistyped id shows up in the output.
 //
-// Telegram's posting permission decides who *may* write in a keyper room; `operators` records which
-// sender id that human is, so the agent can be told whether an operator or a teammate wrote. The two
-// are separate: the permission is enforced by Telegram, the record is kept here, and an operator who
-// has not been recorded yet reads as a teammate until `add-operator` says otherwise.
+// Two separate things decide the operator. Telegram's posting permission decides who may write in a
+// keyper room. `operators` records which sender id that human is, so the agent can be told whether
+// an operator or a teammate wrote. An operator nobody has recorded yet reads as a teammate.
 //
-// A group is addressed by its chat id everywhere, because whoever made the group has that and not
-// the User's uuid. The bot tells an unregistered chat both ids it needs. `attach-chat` is the exception
-// and takes the uuid, which `list-chats` prints last: it is what to reach for when the chat id is the
-// thing that is wrong or missing, so there is no chat id to name the group by.
+// Every command takes a chat id, because that is what whoever made the group has. `attach-chat` is
+// the exception and takes the User's uuid, which `list-chats` prints last. You reach for it when the
+// chat id is the broken thing, so there is no chat id to name the group by.
 //
-// A sender id cannot be invented, only observed: it arrives in the reply to an unregistered chat,
-// or in `list-members` once that person has written to a registered one.
+// A sender id cannot be invented, only observed. It arrives in the reply to an unregistered chat, or
+// in `list-members` once that person has written somewhere registered.
 
 import { eq } from "drizzle-orm";
 import { openDb } from "@shutter-network/concorde/db";
@@ -85,7 +80,7 @@ function attributesOf(user: { attributes: unknown }): GroupAttributes {
   return (user.attributes ?? {}) as GroupAttributes;
 }
 
-// `setAttributes` replaces wholesale, so every change reads first and writes the whole shape back.
+// `setAttributes` replaces the whole value, so every change reads first and writes it all back.
 async function amendAttributes(
   userId: string,
   amend: (current: GroupAttributes) => GroupAttributes,
@@ -114,15 +109,15 @@ try {
     case "add-keyper-chat": {
       const [name, chatId, keyper, operator] = args;
       if (name === undefined || chatId === undefined || keyper === undefined) usage();
-      // Telegram gives a group a negative id. Only a warning: the sign is a convention rather than
-      // a documented guarantee, and the Channel refuses a private chat on its type anyway.
+      // Telegram gives a group a negative id. Warn only: the sign is a convention, not a documented
+      // guarantee, and the Channel refuses a private chat on its type anyway.
       if (!chatId.startsWith("-")) {
         console.warn(`warning: ${chatId} is positive, and a Telegram group's id is negative`);
       }
-      // One chat per keyper, refused rather than warned about: two rooms covering one keyper means
-      // two places its operators are written to and two places they answer from, and no way to say
-      // which is the keyper's. Moving a keyper to another group keeps its log, its operators and
-      // its history, and registering it again would strand all three on the first User.
+      // One chat per keyper, refused rather than warned about. Two rooms covering one keyper means
+      // two places its operators are written to and two places they answer from, with no way to say
+      // which is the keyper's. Move a keyper rather than registering it again: registering again
+      // builds a new User and strands the first one's log, operators and history.
       const already = (await users.list()).filter((u) => {
         const a = attributesOf(u);
         return a.kind === "keyper" && a.keyper === keyper;
@@ -151,8 +146,8 @@ try {
       break;
     }
 
-    // Its own command rather than a flag, so the kind is written by whoever runs it and cannot be
-    // arrived at by leaving an argument out.
+    // Its own command rather than a flag, so whoever runs it writes the kind down. Leaving an
+    // argument out cannot produce one by accident.
     case "add-teammate-chat": {
       const [name, chatId] = args;
       if (name === undefined || chatId === undefined) usage();
@@ -160,8 +155,8 @@ try {
         console.warn(`warning: ${chatId} is positive, and a Telegram group's id is negative`);
       }
       const existing = (await users.list()).filter((u) => attributesOf(u).kind === "teammate");
-      // Not refused: nothing is aggregated, so a second teammate chat is harmless. Said out loud
-      // because an unintended one would quietly hold the licence to ask every operator.
+      // Not refused, because a second teammate chat is harmless. Warned about, because one nobody
+      // meant to make could still ask every operator.
       if (existing.length > 0) {
         console.warn(`warning: ${existing.length} teammate chat(s) already exist`);
       }
@@ -257,8 +252,8 @@ try {
       const userId = await userFor(chatId);
       const { kind, name } = attributesOf((await users.get(userId))!);
       await handle.delete(chats).where(eq(chats.chatId, chatId));
-      // Says what it removed rather than only that it removed something: one command serves both
-      // kinds, so naming the kind and the name is what makes a mistyped id visible afterwards.
+      // Names what it removed, not just that it removed something. One command serves both kinds,
+      // so printing the kind and the name is what makes a mistyped id visible.
       console.log(
         `${kind ?? "kindless"} chat ${chatId} (${name ?? "unnamed"}) is detached from user ${userId}; their log stays`,
       );

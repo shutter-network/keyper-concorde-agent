@@ -45,8 +45,8 @@ describe("telling an operator from a teammate", () => {
     assert.equal(roleOf(senderOf(teammate, "bob"), [operator]), "a teammate");
   });
 
-  // Telegram already stops a teammate writing in a keyper chat, so this is the not-yet-recorded
-  // operator rather than a stranger: they read as a teammate until `operator-add` says otherwise.
+  // Telegram already stops a teammate writing in a keyper chat, so this is the operator nobody has
+  // recorded yet, not a stranger. They read as a teammate until `add-operator` runs.
   it("calls a writer a teammate while no operator is recorded", () => {
     assert.equal(roleOf(senderOf(operator, "alice"), []), "a teammate");
   });
@@ -102,7 +102,7 @@ describe("assembling the prompt's values", () => {
     }
   });
 
-  // A hand-edited row is the reason `promptData` checks rather than casts, and a sender id written
+  // `promptData` checks rather than casts because a row may have been edited by hand. A sender id
   // as a number is the likeliest way to write one.
   it("knows an operator whose id was written as a number", () => {
     const data = promptData(message, senderOf(operator, "alice"), {
@@ -127,8 +127,8 @@ describe("assembling the prompt's values", () => {
     }
   });
 
-  // An unreadable kind must not fall back to either: a teammate chat carries the licence to message
-  // every operator, and a hand-edited row must not be able to grant it.
+  // An unreadable kind must not fall back to either kind. A teammate chat may message every
+  // operator, and a hand-edited row must not be able to grant that.
   it("refuses a chat whose kind it cannot read", () => {
     for (const attributes of [null, undefined, {}, "nonsense", { kind: "keyperr" }, { keyper: "kpr-jstcz" }]) {
       assert.throws(() => promptData(message, undefined, attributes), UnknownGroupKindError);

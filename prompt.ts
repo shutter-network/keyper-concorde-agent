@@ -1,24 +1,21 @@
-// What the agent is told about one inbound Message, assembled from the Message and the group's own
-// Attributes.
+// What the agent is told about one inbound Message.
 //
-// Nothing here names a person. A chat holds several, and the agent is told only whether an operator
-// or a teammate wrote -- no username, first name or id. Its answer is attached to the question
-// instead, which is what tells the room who is being answered. A handle written into the message
-// text still reaches the model, and nothing here can prevent that.
+// Nothing here names a person. The agent is told only whether an operator or a teammate wrote, never
+// a username or an id. Its answer is attached to the question, and that is what shows the room who
+// is being answered. A handle typed into the message text still reaches the model.
 //
-// Pure, and separate from main.ts because main.ts starts a Gateway as it is imported and so cannot
-// be reached by a test. Nothing here touches the database: the Handler reads, and passes the
-// results in.
+// Separate from main.ts because importing main.ts starts a Gateway, so a test cannot reach it.
+// Nothing here touches the database. The Handler reads, and passes the results in.
 
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
-// A keyper chat covers one keyper and, by Telegram's own posting permission, only its operator
-// writes in it; a teammate chat covers none and holds teammates.
+// A keyper chat covers one keyper, and Telegram's posting permission lets only its operator write
+// there. A teammate chat covers none and holds teammates.
 export type GroupKind = "keyper" | "teammate";
 
-// What `admin.ts` writes onto a User. `operators` holds the sender ids that count as the operator of
-// a keyper chat; a teammate chat has none, so everyone who writes there is a teammate.
+// What `admin.ts` writes onto a User. `operators` holds the sender ids that count as the operator.
+// A teammate chat has none, so everyone who writes there is a teammate.
 export type GroupAttributes = {
   readonly kind: GroupKind;
   readonly name?: string;
@@ -52,9 +49,8 @@ export class UnboundGroupError extends Error {
 }
 
 // Everyone who is not a recorded operator is a teammate. Telegram already stops a teammate writing
-// in a keyper chat, so the list is what names *which* human the operator is rather than what decides
-// whether they may speak -- and an operator who has not been recorded yet reads as a teammate until
-// `admin.ts add-operator` says otherwise.
+// in a keyper chat, so this list does not decide who may speak. It only names which human the
+// operator is. An operator nobody has recorded yet reads as a teammate until `add-operator` runs.
 export function roleOf(
   sender: TelegramSender | undefined,
   operators: readonly string[],
@@ -63,9 +59,9 @@ export function roleOf(
   return operators.includes(sender.senderId) ? "the operator" : "a teammate";
 }
 
-// Attributes are `unknown` on the way out of the framework, and a hand-edited row is the reason this
-// checks rather than casts. A teammate chat carrying a stray `keyper` is ignored rather than
-// refused: `admin.ts` will not create one, and refusing here would break a chat that otherwise works.
+// Attributes come out of the framework as `unknown`, and a row may have been edited by hand, so this
+// checks rather than casts. A stray `keyper` on a teammate chat is ignored, not refused: `admin.ts`
+// never creates one, and refusing would break a chat that works.
 export function groupAttributes(userId: string, attributes: unknown): GroupAttributes {
   const shape = attributes as GroupAttributes | null;
   const kind = shape?.kind;
@@ -82,8 +78,8 @@ export function promptData(
   attributes: unknown,
 ): PromptData {
   const group = groupAttributes(message.userId, attributes);
-  // Through `String`, because Attributes are JSON somebody may have edited by hand: a sender id
-  // written as a number would never match, and would quietly demote the operator to a teammate.
+  // Through `String`, because the row may have been edited by hand. A sender id written as a number
+  // would match nothing, and would quietly demote the operator to a teammate.
   const operators = Array.isArray(group.operators) ? group.operators.map(String) : [];
   return {
     userId: message.userId,
