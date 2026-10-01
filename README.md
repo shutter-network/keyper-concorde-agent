@@ -9,11 +9,12 @@ Built from `examples/00_minimal` of `shutter-network/concorde` at commit `e3f746
 - `telegram-channel/`, a Channel for the Telegram Bot API, written against the Messenger's
   Channel contract and modelled on the framework's Nostr Channel. It replaces the HTTP Channel.
   Meant to move into Concorde as `@shutter-network/concorde/telegram-channel` once it has run.
-- `main.ts` forwards whichever provider keys are set instead of requiring the Anthropic one,
-  mounts `models.json` into the agent container, and attaches the tester's chat to the seeded
-  user at boot.
-- `settings.json` and `models.json` point pi at an OpenAI-compatible endpoint of your choice.
-  Both are per machine, copied from their `.example` files and never committed.
+- `main.ts` mounts `models.json` in the agent container without passing it any model API keys.
+  It links the tester's chat to the initial user when the gateway starts.
+- the `litellm` service stores the model API keys and adds them to requests sent to providers.
+  The agent has no model API keys. See [The model proxy](#the-model-proxy).
+- `settings.json` and `models.json` set the model and tell pi to use the proxy. Each machine
+  has its own copies, made from the `.example` files. These copies are never committed.
 - `AGENTS.md` adds the Grafana dashboard instructions.
 
 ## The framework dependency
@@ -29,13 +30,42 @@ mv shutter-network-concorde-0.1.0.tgz path/to/this/repo/vendor/
 
 When the package is published, `package.json` goes back to `"^0.1.0"` and `vendor/` is deleted.
 
+## The model proxy
+
+The `litellm` service stores the model API keys and adds the correct key to each request it
+sends to a provider. Neither the agent nor the gateway receives these keys. The agent cannot
+find any model API keys by reading its environment.
+
+Three files configure the proxy and its connection to pi:
+
+| file | role | in git? |
+|---|---|---|
+| `litellm-config.yaml` | sends requests for any `claude-*` model to Anthropic and all other models to `LOCAL_API_BASE` | yes |
+| `models.json` | tells pi to send requests to the proxy instead of directly to the provider | no, each machine has its own copy |
+| `.env` | stores the real model API keys and the local endpoint, which only the proxy reads | no, each machine has its own copy |
+
+### Updating the configuration and switching models
+
+**Replace the old `models.json` on every machine, including the droplet.** Copy the new
+`models.json.example` to `models.json`. If you keep the old endpoint and a real API key in
+`models.json`, requests still work, but the agent still has the key. There is no warning.
+
+**`switch-model.sh` does not check which provider a model ID belongs to.** It changes only the
+model ID in `settings.json` and `models.json`; it does not change other settings in those files.
+The proxy sends requests for any `claude-*` ID to Anthropic and all other IDs to `LOCAL_API_BASE`.
+You can safely switch between two Claude models or between two local models. When switching
+providers, check that the new provider's key is set. If you switch to a local model without
+setting `LOCAL_API_KEY`, the switch succeeds, but the first agent run fails.
+
 ## Before the first run
 
 1. Put the tarball in `vendor/` as above.
-2. `cp .env.example .env` and fill in `LOCAL_API_KEY`, `USER_PASSWORD`, `TG_TOKEN`, `TG_CHAT`.
+2. `cp .env.example .env` and fill in `LOCAL_API_BASE`, `LOCAL_API_KEY`, `USER_PASSWORD`,
+   `TG_TOKEN`, and `TG_CHAT`. If you use Anthropic, set `ANTHROPIC_API_KEY` and leave
+   `LOCAL_API_BASE` and `LOCAL_API_KEY` blank. You still need the other values.
 3. `cp models.json.example models.json` and `cp settings.json.example settings.json`, then put
-   the endpoint URL and the model id in both. The key stays in `.env`; `models.json` refers to
-   it as `$LOCAL_API_KEY`.
+   your model id in both. Store the endpoint and API key in `.env`, where the proxy reads them.
+   The agent does not read these values. Use a placeholder key in `models.json`, never a real key.
 4. If another process polls the same bot token, stop it first. Telegram hands each update to
    one poller, and the Channel logs a 409 until the other one is gone.
 
@@ -96,8 +126,10 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
   the error on the `Run finished` line, and in the agent container's own log while it runs:
   `docker logs $(docker ps -q --filter ancestor=keyper-concorde-agent:0.83.0)`.
 - If the model endpoint is down, every message looks like the agent is offline. Test the
-  endpoint directly with a one-word chat completion before debugging anything here, with
-  `BASE_URL`, `API_KEY` and `MODEL` set to the values from `models.json` and `settings.json`:
+  endpoint directly with a one-word chat completion before debugging this deployment. Set
+  `BASE_URL` to `LOCAL_API_BASE` from `.env`, `API_KEY` to `LOCAL_API_KEY` from `.env`, and
+  `MODEL` to the model ID from `settings.json`. This request skips the proxy and checks whether
+  the provider itself is responding:
 
   ```sh
   curl -sS -m 60 -w '\nHTTP %{http_code} in %{time_total}s\n' \
@@ -118,7 +150,8 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 |---|---|
 | `main.ts` | the deployment: runtime, components, handler, seeding |
 | `telegram-channel/` | the Telegram Channel: schema, chats, outbox, Bot API, channel |
-| `compose.yml` | gateway, migrate, postgres, agent image |
+| `compose.yml` | gateway, litellm, migrate, postgres, agent image |
+| `litellm-config.yaml` | sets the provider for each model name |
 | `AGENTS.md` | the agent's instructions, mounted read-only |
 | `settings.json`, `models.json` | pi's model configuration, mounted read-only |
 | `schema.ts`, `drizzle.config.ts` | tables the deployment applies with drizzle-kit |
