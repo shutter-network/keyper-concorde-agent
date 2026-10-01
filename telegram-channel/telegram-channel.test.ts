@@ -15,7 +15,7 @@ import { ChatConflictError, MalformedChatIdError, NoSuchUserError } from "./chat
 import { type FakeBotApi, startFakeBotApi } from "./fake-bot-api.ts";
 import { UnrecordedChatError } from "./outbound.ts";
 import * as telegramChannelSchema from "./schema/index.ts";
-import { outbox, telegramChannelTables } from "./schema/index.ts";
+import { outbox, senders, telegramChannelTables } from "./schema/index.ts";
 import type { TelegramUpdate } from "./telegram-api.ts";
 import { createTelegramChannel, type TelegramChannel } from "./telegram-channel.ts";
 import {
@@ -227,6 +227,112 @@ describe("inbound", () => {
         return (await messenger.history(userId)).length >= 1;
       });
       assert.deepEqual((await messenger.history(userId)).map((m) => m.text), ["with text"]);
+    });
+  });
+});
+
+describe("sender metadata", () => {
+  const senderRows = (messageId: string) =>
+    db.handle(telegramChannelTables).select().from(senders).where(eq(senders.messageId, messageId));
+
+  // Telegram numbers updates and messages in different spaces, so the fixtures keep them apart:
+  // reading `update_id` where `message_id` belongs would otherwise pass unnoticed.
+  let nextTelegramMessage = 900000;
+
+  const updateFrom = (
+    chatId: string,
+    text: string,
+    from: { id: number; username?: string } | undefined,
+    id: number = nextUpdate++,
+    messageId: number = nextTelegramMessage++,
+  ): TelegramUpdate => ({
+    update_id: id,
+    message: {
+      message_id: messageId,
+      text,
+      chat: { id: Number(chatId), type: "private" },
+      ...(from === undefined ? {} : { from }),
+    },
+  });
+
+  it("records a sender that has a username", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      const id = nextUpdate++;
+      const messageId = nextTelegramMessage++;
+      api.push(updateFrom(chatId, "from a named sender", { id: 4242, username: "alice" }, id, messageId));
+      await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
+      const [message] = await messenger.history(userId);
+      assert.deepEqual(await db.tx((tx) => channel.senderOf(tx, message.id)), {
+        senderId: "4242",
+        username: "alice",
+        chatId,
+        telegramMessageId: String(messageId),
+      });
+      assert.equal(message.text, "from a named sender"); // the text itself is untouched
+    });
+  });
+
+  it("records a sender that has no username", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      const id = nextUpdate++;
+      const messageId = nextTelegramMessage++;
+      api.push(updateFrom(chatId, "from an unnamed sender", { id: 777 }, id, messageId));
+      await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
+      const [message] = await messenger.history(userId);
+      assert.deepEqual(await db.tx((tx) => channel.senderOf(tx, message.id)), {
+        senderId: "777",
+        username: null,
+        chatId,
+        telegramMessageId: String(messageId),
+      });
+    });
+  });
+
+  it("records a message Telegram named no sender for", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      const id = nextUpdate++;
+      const messageId = nextTelegramMessage++;
+      // A channel post or an anonymous group admin carries no `from`. The row is still written, so
+      // "recorded, sender unknown" stays distinguishable from "nothing recorded".
+      api.push(updateFrom(chatId, "from nobody in particular", undefined, id, messageId));
+      await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
+      const [message] = await messenger.history(userId);
+      assert.deepEqual(await db.tx((tx) => channel.senderOf(tx, message.id)), {
+        senderId: null,
+        username: null,
+        chatId,
+        telegramMessageId: String(messageId),
+      });
+    });
+  });
+
+  it("a redelivered update does not record the sender twice", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      const id = nextUpdate++;
+      const update = updateFrom(chatId, "sent once", { id: 555, username: "bob" }, id, nextTelegramMessage++);
+      api.push(update);
+      await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
+      const [message] = await messenger.history(userId);
+
+      // The poll offset lives in the poll loop, so a restart forgets it and Telegram's redelivery
+      // really reaches the Channel a second time -- which is what `received` exists to absorb.
+      await channel.stop();
+      api.push(update);
+      api.push(updateFrom(chatId, "sent after", { id: 555 }));
+      await channel.start();
+      await waitUntil("the later Message arrived", async () =>
+        (await messenger.history(userId)).some((m) => m.text === "sent after"),
+      );
+
+      assert.deepEqual(
+        (await messenger.history(userId)).map((m) => m.text),
+        ["sent once", "sent after"], // the replay produced no second Message
+      );
+      assert.equal((await senderRows(message.id)).length, 1); // and no second metadata row
     });
   });
 });
