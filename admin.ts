@@ -9,24 +9,24 @@
 //   docker compose run --rm --no-deps gateway node admin.ts add-operator <chatId> <senderId>
 //   docker compose run --rm --no-deps gateway node admin.ts remove-operator <chatId> <senderId>
 //
-// A chat is either a **keyper chat**, covering one keyper, or a **teammate chat**, covering none.
-// The kind is written down, never inferred. Only a teammate chat may ask about every keyper at once,
-// and a chat must not drift into holding that. Both add commands create the User, name it, attach
-// the chat and record the kind in one transaction, so a chat nobody can reach never exists.
+// A keyper chat is assigned to one keyper. A teammate chat is for the team and has no keyper.
+// Store the chat kind explicitly because only teammate chats may request actions for all keypers.
+// Both add commands create the User, set its name and kind, and link its Telegram chat in one
+// transaction. This prevents partially registered groups that cannot receive messages.
 //
-// `remove-chat` removes the chat and nothing else. The framework removes no User and the message log
-// stays. It names what it removed, so a mistyped id shows up in the output.
+// `remove-chat` deletes only the link to the Telegram chat. It keeps the User and message history.
+// The output identifies the removed chat so the administrator can spot an incorrect ID.
 //
-// Two separate things decide the operator. Telegram's posting permission decides who may write in a
-// keyper room. `operators` records which sender id that human is, so the agent can be told whether
-// an operator or a teammate wrote. An operator nobody has recorded yet reads as a teammate.
+// Telegram posting permissions control who can write in a keyper group. The `operators` list
+// records their sender IDs so the agent can distinguish operators from teammates.
+// An operator is labeled as a teammate until their sender ID is recorded.
 //
-// Every command takes a chat id, because that is what whoever made the group has. `attach-chat` is
-// the exception and takes the User's uuid, which `list-chats` prints last. You reach for it when the
-// chat id is the broken thing, so there is no chat id to name the group by.
+// Commands that identify an existing group use its Telegram chat ID, which the group creator knows.
+// `attach-chat` also takes the User UUID shown at the end of `list-chats` output. This lets an
+// administrator attach the correct chat when the old chat ID is wrong or no longer valid.
 //
-// A sender id cannot be invented, only observed. It arrives in the reply to an unregistered chat, or
-// in `list-members` once that person has written somewhere registered.
+// Use a sender ID observed in Telegram; do not invent one. The reply to an unregistered chat
+// includes it. After the person writes in a registered chat, it also appears in `list-members`.
 
 import { eq } from "drizzle-orm";
 import { openDb } from "@shutter-network/concorde/db";
@@ -80,7 +80,7 @@ function attributesOf(user: { attributes: unknown }): GroupAttributes {
   return (user.attributes ?? {}) as GroupAttributes;
 }
 
-// `setAttributes` replaces the whole value, so every change reads first and writes it all back.
+// `setAttributes` replaces all attributes. Read the current values first so unrelated fields are kept.
 async function amendAttributes(
   userId: string,
   amend: (current: GroupAttributes) => GroupAttributes,
@@ -109,15 +109,15 @@ try {
     case "add-keyper-chat": {
       const [name, chatId, keyper, operator] = args;
       if (name === undefined || chatId === undefined || keyper === undefined) usage();
-      // Telegram gives a group a negative id. Warn only: the sign is a convention, not a documented
-      // guarantee, and the Channel refuses a private chat on its type anyway.
+      // Telegram group IDs are normally negative, but this is not a documented guarantee.
+      // Only warn here; the Channel separately rejects private chats based on their chat type.
       if (!chatId.startsWith("-")) {
         console.warn(`warning: ${chatId} is positive, and a Telegram group's id is negative`);
       }
-      // One chat per keyper, refused rather than warned about. Two rooms covering one keyper means
-      // two places its operators are written to and two places they answer from, with no way to say
-      // which is the keyper's. Move a keyper rather than registering it again: registering again
-      // builds a new User and strands the first one's log, operators and history.
+      // Reject a second chat for the same keyper. Otherwise, messages and replies could be split
+      // between two groups with no clear choice of which group to use. To move a keyper, attach
+      // the new chat to the existing User. Registering again creates a new User and leaves the
+      // message history and operator records attached to the old one.
       const already = (await users.list()).filter((u) => {
         const a = attributesOf(u);
         return a.kind === "keyper" && a.keyper === keyper;
@@ -146,8 +146,8 @@ try {
       break;
     }
 
-    // Its own command rather than a flag, so whoever runs it writes the kind down. Leaving an
-    // argument out cannot produce one by accident.
+    // Use a separate command so the administrator explicitly chooses a teammate chat.
+    // Omitting an argument from another command must not create one accidentally.
     case "add-teammate-chat": {
       const [name, chatId] = args;
       if (name === undefined || chatId === undefined) usage();
@@ -155,8 +155,8 @@ try {
         console.warn(`warning: ${chatId} is positive, and a Telegram group's id is negative`);
       }
       const existing = (await users.list()).filter((u) => attributesOf(u).kind === "teammate");
-      // Not refused, because a second teammate chat is harmless. Warned about, because one nobody
-      // meant to make could still ask every operator.
+      // Allow multiple teammate chats, but warn about existing ones. An accidentally created
+      // teammate chat would still have permission to contact every operator.
       if (existing.length > 0) {
         console.warn(`warning: ${existing.length} teammate chat(s) already exist`);
       }
@@ -180,10 +180,10 @@ try {
         .from(senders)
         .where(eq(senders.chatId, chatId))
         .orderBy(senders.recordedAt);
-      // Everyone who has written, latest word on each, and then the operators who have not. An
-      // operator is recorded by hand and may never have written, and leaving them out would answer
-      // "who is in this room" by omitting the one person most worth seeing. A reader is invisible
-      // either way: Telegram only ever names a sender on a message.
+      // List each sender using their most recent record, then include registered operators who
+      // have never posted. Operators are added manually, so message records alone may omit them.
+      // Other members who only read messages cannot be listed because Telegram provides sender
+      // details only when someone posts.
       const latest = new Map(rows.map((r) => [r.senderId ?? "-", r]));
       if (latest.size === 0 && operators.length === 0) {
         console.log(`nobody has written to chat ${chatId} yet, and no operator is recorded`);
@@ -232,9 +232,9 @@ try {
       break;
     }
 
-    // Telegram changes a group's id when it upgrades a basic group to a supergroup, and a typo is
-    // corrected the same way: `remove-chat`, then `attach-chat` with the right id. Adding a chat would
-    // strand the log and the keyper on the first.
+    // To fix a chat ID or update it after Telegram upgrades a group to a supergroup, run
+    // `remove-chat`, then `attach-chat` with the correct ID. This keeps the existing User,
+    // message history and keyper assignment together.
     case "attach-chat": {
       const [userId, chatId] = args;
       if (userId === undefined || chatId === undefined) usage();
@@ -252,8 +252,8 @@ try {
       const userId = await userFor(chatId);
       const { kind, name } = attributesOf((await users.get(userId))!);
       await handle.delete(chats).where(eq(chats.chatId, chatId));
-      // Names what it removed, not just that it removed something. One command serves both kinds,
-      // so printing the kind and the name is what makes a mistyped id visible.
+      // Print the chat kind and name so the administrator can spot an incorrect ID.
+      // This command handles both keyper and teammate chats.
       console.log(
         `${kind ?? "kindless"} chat ${chatId} (${name ?? "unnamed"}) is detached from user ${userId}; their log stays`,
       );

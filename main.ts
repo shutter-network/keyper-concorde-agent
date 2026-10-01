@@ -54,8 +54,8 @@ const gateway = createGateway({
     const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
     const messenger = createMessenger({ db, users, worker, agentServer });
     // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
-    // Groups only: a 1:1 chat has no keyper to answer about, and is refused before it becomes a
-    // Message.
+    // Accept group chats only. Reject private chats before storing a Message because they
+    // have no assigned keyper.
     const telegram = createTelegramChannel({
       db,
       messenger,
@@ -73,7 +73,7 @@ const gateway = createGateway({
 
 Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`,
         session: (signal) => `user_${signal.payload.userId}`,
-        // The reads live here so assembling the values stays pure and testable in prompt.ts.
+        // Read the database here so prompt.ts can build prompt data without database access.
         data: async (signal) => {
           const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
           const user = await users.get(signal.payload.userId);
@@ -81,8 +81,8 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
           return promptData(signal.payload, sender, user?.attributes);
         },
       }),
-      // The template handler has no failure path. Without this a failed Run is one log line and
-      // the sender hears nothing.
+      // The template handler does not notify users when a Run fails.
+      // Send a failure message here so the sender receives an answer as well as a log entry.
       async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
         if (!outcome.failed) return;
         await db.tx((tx) =>
@@ -99,9 +99,9 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
 
 await gateway.start();
 
-// Nothing is seeded. A User with no chat and no keyper could receive nothing and answer about
-// nothing, so `admin.ts` is the only place a group is made and the only place its chat and keyper
-// are recorded together.
+// Do not create default Users at startup. Register groups through `admin.ts`, which saves
+// the chat link and any keyper assignment together. This avoids creating Users that cannot
+// receive messages or keyper groups with no assigned keyper.
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {

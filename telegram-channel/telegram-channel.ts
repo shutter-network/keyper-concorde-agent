@@ -2,9 +2,9 @@
 //
 // Inbound: one long poll on getUpdates. A text from a chat some User holds becomes that User's
 // Message, inside one transaction with the update id, so a redelivery is dropped. A text from a
-// chat nobody holds is answered once with its own chat id and the sender id of whoever wrote,
-// outside the log, which is how those ids reach whoever registers the chat. A chat of a kind
-// `chatMode` excludes is answered once too, and is never told either.
+// chat with no registration gets a reply with the chat ID and sender ID needed to register it.
+// This reply is not stored in the message log. Chats excluded by `chatMode` get a rejection
+// without either ID. Send one reply for each rejected incoming message.
 //
 // Outbound: `send` writes an outbox row inside the Messenger's transaction and rings a NOTIFY.
 // The drain then calls sendMessage after the commit, deletes the row on success, keeps it with a
@@ -49,7 +49,7 @@ export type TelegramChannelOptions = {
   readonly pollTimeoutSeconds?: number;
   /** Pause after a failed poll before the next one. Default 5000. */
   readonly retryDelayMs?: number;
-  /** Which kinds of chat become Messages. Default "both", which restricts nothing. */
+  /** Accepted chat types. Defaults to "both", which accepts all chat types. */
   readonly chatMode?: TelegramChatMode;
   /** For tests against a fake Bot API. */
   readonly apiBaseUrl?: string;
@@ -69,16 +69,16 @@ export type TelegramChannel = Channel & {
     userId: string,
   ): Promise<string | undefined>;
 
-  /** What Telegram said about this Message: its sender, chat and message id, or undefined. */
+  /** Return Telegram sender details, chat details and message ID, or undefined if not recorded. */
   senderOf<TSchema extends Record<string, unknown>>(
     tx: Handle<TSchema>,
     messageId: string,
   ): Promise<TelegramSender | undefined>;
 
   /**
-   * The Telegram message this User's next reply should be attached to, or null to attach it to
-   * nothing. Set while the Signal is claimed, so the reply quotes the message that woke the Run
-   * rather than whatever arrived in the meantime.
+   * Set the Telegram message that this User's next reply should quote. Pass null to clear it.
+   * Set this when claiming the Signal so the reply quotes the message that triggered the Run,
+   * even if another message arrives before the Run finishes.
    */
   expectReplyTo(userId: string, telegramMessageId: string | null): void;
 
@@ -99,18 +99,18 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
   let listening: Listening | undefined;
   let draining: Promise<void> = Promise.resolve();
   let ticker: ReturnType<typeof setInterval> | undefined;
-  // What each User's next reply quotes. In memory, because it only has to live from the moment a
-  // Signal is claimed to the moment the Run answers, and both happen in this process. The answer
-  // itself carries the id onto its outbox row, so a reply queued before a restart still quotes
-  // correctly when it drains after one.
+  // Track the message that each User's replies should quote. This map only needs to last from
+  // when a Signal is claimed until its Run responds, which happens in the same process.
+  // Queued replies also save the target ID in the outbox, so delivery after a restart still
+  // quotes the correct message.
   //
-  // Never cleared on use, and overwritten by every claimed Signal: a Run that answers twice quotes
-  // the question both times, and the failure notice the post phase sends quotes what it could not
-  // process.
+  // Keep the target after sending a reply and replace it when the next Signal is claimed.
+  // This lets multiple replies from one Run, including a failure notice from the post phase,
+  // quote the same original question.
   const replyTargets = new Map<string, string>();
 
-  // A reply to a chat that has no Message to carry it, and so no outbox row either. It is told
-  // once per message it sends, because nothing here remembers a chat it refused.
+  // Reply directly to a rejected chat without creating a Message or outbox row.
+  // Send a reply for each incoming message because rejected chats are not remembered.
   async function tell(chatId: string, text: string, signal: AbortSignal): Promise<void> {
     try {
       await api.sendMessage(chatId, text, signal);
@@ -127,8 +127,8 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
 
     const chatId = String(message.chat.id);
     const chatType = message.chat.type;
-    // Ahead of the lookup, so a kind this deployment does not serve is never told its own id and
-    // invited into an enrolment that would be refused here anyway.
+    // Check the chat type before looking up its registration. Unsupported chat types should
+    // not receive registration IDs or an invitation to register.
     if (!serves(chatMode, chatType)) {
       log.info(
         { chatId, chatType, update: update.update_id },
@@ -144,8 +144,8 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
         { chatId, update: update.update_id },
         "a Telegram message came from a chat no User holds, and was dropped",
       );
-      // Both ids, because registering the chat wants one and naming a person wants the other, and
-      // this reply is the only place either is told to anybody.
+      // Include the chat ID for registering the group and the sender ID for registering its
+      // operator. This reply provides those IDs when the chat has no stored records yet.
       const who = message.from === undefined ? "" : ` You are ${message.from.id}.`;
       await tell(chatId, `This chat is not registered with the agent. Its id is ${chatId}.${who}`, signal);
       return;
@@ -159,7 +159,7 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
         .returning({ updateId: received.updateId });
       if (claimed === undefined) return false;
       const record = await inbound.receive(tx, userId, text);
-      // The same transaction, so the Message and what Telegram said about it commit together.
+      // Save the Message and its Telegram sender details in the same transaction.
       await insertSender(tx, record.id, {
         senderId: message.from === undefined ? null : String(message.from.id),
         username: message.from?.username ?? null,
@@ -218,8 +218,8 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
       return false;
     }
     await deleteSent(handle, row.messageId);
-    // `replyTo` is logged because the row carrying it is deleted on success, and nothing afterwards
-    // can otherwise say which message a delivered reply was attached to.
+    // Log `replyTo` because the outbox row is deleted after a successful send.
+    // The log preserves which original message the delivered reply quoted.
     log.info(
       { message: row.messageId, userId: row.userId, replyTo: row.replyTo },
       "a Message reached Telegram",

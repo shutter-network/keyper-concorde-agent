@@ -232,8 +232,8 @@ describe("inbound", () => {
     });
   });
 
-  // The only place either id is told to anybody: nothing is written for an unknown chat, so the
-  // sender who writes first is never recorded and this reply is the whole of the enrolment path.
+  // Unregistered chats create no message or sender records. The registration reply must
+  // provide both IDs so the administrator can register the chat and its first sender.
   it("an unknown chat is told the sender id as well as its own", async () => {
     await withDeployment(async ({ api }) => {
       const strangerChat = newChatId();
@@ -249,7 +249,7 @@ describe("inbound", () => {
       });
       await waitUntil("the stranger got an answer", () => sentTo(api, strangerChat).length === 1);
       const [answer] = sentTo(api, strangerChat);
-      // Anchored on the sentence, because a bare id matches digits inside the other one.
+      // Match the full sentence so one ID cannot accidentally match digits inside the other ID.
       assert.match(answer.text, new RegExp(`Its id is ${strangerChat}\\.`));
       assert.match(answer.text, /You are 874974777\./);
     });
@@ -284,12 +284,12 @@ describe("sender metadata", () => {
   const senderRows = (messageId: string) =>
     db.handle(telegramChannelTables).select().from(senders).where(eq(senders.messageId, messageId));
 
-  // Telegram numbers updates and messages in different spaces, so the fixtures keep them apart:
-  // reading `update_id` where `message_id` belongs would otherwise pass unnoticed.
+  // Use different update IDs and message IDs because Telegram numbers them separately.
+  // Otherwise, a bug that uses update_id in place of message_id could pass this test.
   let nextTelegramMessage = 900000;
 
-  // Rooms, because that is every chat this deployment serves. A private chat would also record a
-  // sender, but Telegram always names one there, so it cannot produce the third case below.
+  // Use group chats, as this deployment does. A private chat would also save sender details,
+  // but Telegram always identifies its sender, so it cannot test the missing-sender case below.
   const updateFrom = (
     chatId: string,
     text: string,
@@ -312,8 +312,8 @@ describe("sender metadata", () => {
       const { userId, chatId } = await admit(channel);
       const id = nextUpdate++;
       const messageId = nextTelegramMessage++;
-      // Telegram sends a first name whether or not there is a username, so the real payload carries
-      // both and storing only one of them would go unnoticed against a fixture that carried one.
+      // Include both first_name and username, as Telegram does when a username is available.
+      // A fixture with only one field would not catch a bug that fails to store the other.
       api.push(
         updateFrom(chatId, "from a named sender", { id: 4242, username: "alice", first_name: "Alice" }, id, messageId),
       );
@@ -355,9 +355,9 @@ describe("sender metadata", () => {
       const { userId, chatId } = await admit(channel);
       const id = nextUpdate++;
       const messageId = nextTelegramMessage++;
-      // Telegram omits `from` on a channel post and for an anonymous group admin, and nowhere else:
-      // a private chat always names its sender. The row is still written, so "recorded, sender
-      // unknown" stays distinguishable from "nothing recorded".
+      // Telegram omits `from` for channel posts and anonymous group admins, but always identifies
+      // the sender in a private chat. Still save a metadata row so an unknown sender can be
+      // distinguished from missing metadata.
       api.push(updateFrom(chatId, "from nobody in particular", undefined, id, messageId, "channel"));
       await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
       const [message] = await messenger.history(userId);
@@ -381,8 +381,8 @@ describe("sender metadata", () => {
       await waitUntil("the Message arrived", async () => (await messenger.history(userId)).length === 1);
       const [message] = await messenger.history(userId);
 
-      // The poll offset lives in the poll loop, so a restart forgets it and Telegram's redelivery
-      // really reaches the Channel a second time. That is what `received` exists to absorb.
+      // Restarting resets the poll offset, so the same update reaches the Channel again.
+      // The `received` table must prevent it from creating a duplicate Message.
       await channel.stop();
       api.push(update);
       api.push(updateFrom(chatId, "sent after", { id: 555 }));
@@ -427,8 +427,8 @@ describe("chat modes", () => {
     );
   });
 
-  // The refusal has to come before the chat is looked up, or a kind that can never be served is
-  // still handed the id it would be enrolled with.
+  // Reject unsupported chat types before looking up registration so the rejection
+  // does not include an ID for registering a chat that cannot be served.
   it("a chat of an unserved kind is never told its own id", async () => {
     await withDeployment(
       async ({ api }) => {
@@ -462,8 +462,8 @@ describe("chat modes", () => {
     );
   });
 
-  // Telegram upgrades a busy group to a supergroup on its own, so serving one and not the other
-  // would break a room without anybody changing anything.
+  // Telegram can automatically upgrade a group to a supergroup. Support both types
+  // so the chat continues working after that change.
   it("a supergroup is served as a room, and its kind is recorded", async () => {
     await withDeployment(
       async ({ api, messenger, channel }) => {
@@ -577,14 +577,14 @@ describe("quoting the question", () => {
       await db.tx((tx) => messenger.send(tx, userId, "yes, it is synced"));
       await waitUntil("Telegram received it", () => sentTo(api, chatId).length === 1);
       assert.equal(sentTo(api, chatId)[0].replyTo, String(messageId));
-      // Without this, Telegram refuses the send outright once the question is deleted, and a 4xx
-      // is permanent here: the answer would be dropped rather than merely losing its quote.
+      // Allow sending after the original question is deleted. Otherwise, Telegram returns a
+      // permanent 4xx error and the answer is never delivered.
       assert.equal(sentTo(api, chatId)[0].allowWithoutReply, true);
     });
   });
 
-  // A question that arrives while a Run is in flight is a Signal nobody has claimed, so it must not
-  // move the target: that is the whole difference from quoting whatever was said last.
+  // A question received during an active Run has not had its Signal claimed yet.
+  // It must not change which original message the current Run's reply quotes.
   it("quotes the question being answered, not a later one", async () => {
     await withDeployment(async ({ api, messenger, channel }) => {
       const { userId, chatId } = await admit(channel);
@@ -612,7 +612,7 @@ describe("quoting the question", () => {
     });
   });
 
-  // Only the first, so a long answer does not repeat the question down the room.
+  // Quote the question only on the first part of a long answer to avoid repeating it in the chat.
   it("quotes the first chunk of a split reply and no other", async () => {
     await withDeployment(async ({ api, messenger, channel }) => {
       const { userId, chatId } = await admit(channel);

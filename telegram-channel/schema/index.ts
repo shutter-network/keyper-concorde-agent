@@ -34,7 +34,7 @@ export const outbox = telegramChannelSchema.table("outbox", {
     .references(() => users.id),
   chatId: text("chat_id").notNull(),
   text: text("text").notNull(),
-  // The Telegram message this reply is attached to, so the room can see which question it answers.
+  // The Telegram message being answered, so the group can see which question this reply addresses.
   replyTo: text("reply_to"),
   reason: text("reason"),
   queuedAt: timestamp("queued_at", { withTimezone: true })
@@ -43,10 +43,10 @@ export const outbox = telegramChannelSchema.table("outbox", {
   failedAt: timestamp("failed_at", { withTimezone: true }),
 });
 
-// What Telegram said about the message that became one inbound Message: its sender, chat and
-// message id. Written in the Message's own transaction; a null sender is Telegram naming nobody.
-// The chat type is kept because a room's User is the room: it is what tells a later reader that
-// the Message is one of several people's rather than its User's own.
+// Store Telegram sender details, chat details and message ID for each incoming Message.
+// Save them in the same transaction as the Message. A null sender means Telegram did not
+// identify the sender. Keep the chat type to show whether the User represents a group,
+// where several people can send messages, or a private chat.
 export const senders = telegramChannelSchema.table("senders", {
   messageId: uuid("message_id").primaryKey(),
   senderId: text("sender_id"),

@@ -45,8 +45,8 @@ describe("telling an operator from a teammate", () => {
     assert.equal(roleOf(senderOf(teammate, "bob"), [operator]), "a teammate");
   });
 
-  // Telegram already stops a teammate writing in a keyper chat, so this is the operator nobody has
-  // recorded yet, not a stranger. They read as a teammate until `add-operator` runs.
+  // Telegram permissions already limit posting in a keyper chat to its operator.
+  // Until `add-operator` records their ID, the agent labels that operator as a teammate.
   it("calls a writer a teammate while no operator is recorded", () => {
     assert.equal(roleOf(senderOf(operator, "alice"), []), "a teammate");
   });
@@ -74,7 +74,7 @@ describe("assembling the prompt's values", () => {
     );
   });
 
-  // No keyper, and nobody in it is an operator, so everyone who writes there is a teammate.
+  // A teammate chat has no assigned keyper or registered operators, so its senders are teammates.
   it("names no keyper for a teammate chat, and calls its writer a teammate", () => {
     assert.deepEqual(promptData(message, senderOf(teammate, "bob"), teammateChat), {
       userId: message.userId,
@@ -85,14 +85,14 @@ describe("assembling the prompt's values", () => {
   });
 
   it("supplies every key the template names, even when null", () => {
-    // Handlebars runs strict here: a key the template names and this omits fails the Signal.
+    // Handlebars strict mode fails if any field used by the template is missing.
     const data = promptData(message, undefined, teammateChat);
     assert.equal(data.role, null);
     assert.deepEqual(Object.keys(data).sort(), ["keyper", "role", "text", "userId"]);
   });
 
-  // A handle must not reach the model through the values this builds. One written into the message
-  // text still does, and cannot be helped here.
+  // Do not add usernames to the prompt data. Usernames typed into the message text
+  // are still passed through; this function does not remove them from the text.
   it("carries no username, first name or sender id anywhere", () => {
     const rendered = JSON.stringify(
       promptData(message, senderOf(operator, "alice", "Alice"), keyperChat),
@@ -102,8 +102,8 @@ describe("assembling the prompt's values", () => {
     }
   });
 
-  // `promptData` checks rather than casts because a row may have been edited by hand. A sender id
-  // as a number is the likeliest way to write one.
+  // Manual database edits may store sender IDs as numbers. `promptData` must normalize
+  // those values so it can still recognize the operator.
   it("knows an operator whose id was written as a number", () => {
     const data = promptData(message, senderOf(operator, "alice"), {
       ...keyperChat,
@@ -119,23 +119,23 @@ describe("assembling the prompt's values", () => {
     }
   });
 
-  // A keyper chat with no keyper would answer about nothing, which is worse than failing: the
-  // Handler's post phase tells the chat its message could not be processed.
+  // Reject a keyper chat with no valid keyper assignment because the agent cannot know which
+  // keyper to answer about. The Handler sends the group a failure message in its post phase.
   it("refuses a keyper chat bound to no keyper", () => {
     for (const keyper of [undefined, "", null, 42]) {
       assert.throws(() => promptData(message, undefined, { kind: "keyper", keyper }), UnboundGroupError);
     }
   });
 
-  // An unreadable kind must not fall back to either kind. A teammate chat may message every
-  // operator, and a hand-edited row must not be able to grant that.
+  // Reject an invalid chat kind instead of choosing a default. A teammate chat can contact
+  // every operator, so an invalid value in a manually edited row must not grant that permission.
   it("refuses a chat whose kind it cannot read", () => {
     for (const attributes of [null, undefined, {}, "nonsense", { kind: "keyperr" }, { keyper: "kpr-jstcz" }]) {
       assert.throws(() => promptData(message, undefined, attributes), UnknownGroupKindError);
     }
   });
 
-  // Not refused for carrying one: admin.ts will not create one, and the chat otherwise works.
+  // Ignore an extra keyper field on a teammate chat. `admin.ts` never adds it, but the chat is still valid.
   it("ignores a stray keyper on a teammate chat", () => {
     const data = promptData(message, senderOf(teammate, "bob"), {
       kind: "teammate",

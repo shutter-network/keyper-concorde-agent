@@ -11,8 +11,8 @@ export type TelegramSender = {
   readonly telegramMessageId: string;
 };
 
-// No conflict clause, unlike `received`: that claim already absorbed the redelivery earlier in this
-// transaction, so a second row here is an invariant violation and raising rolls the Message back.
+// Do not ignore duplicate rows here. The `received` check already filters repeated updates
+// in this transaction. A duplicate sender record indicates a bug and must roll back the Message.
 export async function insertSender<TSchema extends Record<string, unknown>>(
   handle: Handle<TSchema>,
   messageId: string,

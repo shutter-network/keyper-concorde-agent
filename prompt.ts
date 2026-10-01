@@ -1,21 +1,21 @@
-// What the agent is told about one inbound Message.
+// Build the information passed to the agent for an incoming Message.
 //
-// Nothing here names a person. The agent is told only whether an operator or a teammate wrote, never
-// a username or an id. Its answer is attached to the question, and that is what shows the room who
-// is being answered. A handle typed into the message text still reaches the model.
+// Include the sender's role (operator or teammate), but not their username or sender ID.
+// Replies quote the original question so the group can see which message is being answered.
+// Usernames typed into the message text still reach the model.
 //
-// Separate from main.ts because importing main.ts starts a Gateway, so a test cannot reach it.
-// Nothing here touches the database. The Handler reads, and passes the results in.
+// Keep this module separate so tests can import it without starting the Gateway in main.ts.
+// The Handler reads the database and passes the results here; this module does no database work.
 
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
-// A keyper chat covers one keyper, and Telegram's posting permission lets only its operator write
-// there. A teammate chat covers none and holds teammates.
+// A keyper chat is assigned to one keyper, and Telegram permissions allow only its operator
+// to post. A teammate chat is for teammates and has no assigned keyper.
 export type GroupKind = "keyper" | "teammate";
 
-// What `admin.ts` writes onto a User. `operators` holds the sender ids that count as the operator.
-// A teammate chat has none, so everyone who writes there is a teammate.
+// User attributes saved by `admin.ts`. The `operators` list contains operator sender IDs.
+// Teammate chats have no operators, so their senders are labeled as teammates.
 export type GroupAttributes = {
   readonly kind: GroupKind;
   readonly name?: string;
@@ -48,9 +48,9 @@ export class UnboundGroupError extends Error {
   }
 }
 
-// Everyone who is not a recorded operator is a teammate. Telegram already stops a teammate writing
-// in a keyper chat, so this list does not decide who may speak. It only names which human the
-// operator is. An operator nobody has recorded yet reads as a teammate until `add-operator` runs.
+// Label senders who are not registered operators as teammates. Telegram permissions control
+// who can post in a keyper chat; this list only identifies their role for the agent.
+// An operator is labeled as a teammate until `add-operator` records their sender ID.
 export function roleOf(
   sender: TelegramSender | undefined,
   operators: readonly string[],
@@ -59,9 +59,9 @@ export function roleOf(
   return operators.includes(sender.senderId) ? "the operator" : "a teammate";
 }
 
-// Attributes come out of the framework as `unknown`, and a row may have been edited by hand, so this
-// checks rather than casts. A stray `keyper` on a teammate chat is ignored, not refused: `admin.ts`
-// never creates one, and refusing would break a chat that works.
+// Validate the required attributes because the framework returns `unknown` and database rows
+// may have been edited manually. Ignore an extra `keyper` field on a teammate chat.
+// `admin.ts` never adds that field, but its presence should not stop a valid chat from working.
 export function groupAttributes(userId: string, attributes: unknown): GroupAttributes {
   const shape = attributes as GroupAttributes | null;
   const kind = shape?.kind;
@@ -78,8 +78,8 @@ export function promptData(
   attributes: unknown,
 ): PromptData {
   const group = groupAttributes(message.userId, attributes);
-  // Through `String`, because the row may have been edited by hand. A sender id written as a number
-  // would match nothing, and would quietly demote the operator to a teammate.
+  // Convert IDs to strings in case someone stored them as numbers during a manual database edit.
+  // Otherwise, the comparison would fail and the operator would be labeled as a teammate.
   const operators = Array.isArray(group.operators) ? group.operators.map(String) : [];
   return {
     userId: message.userId,

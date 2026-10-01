@@ -11,7 +11,7 @@ services:
       # Provider keys are optional here; main.ts forwards whichever are set.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LOCAL_API_KEY: ${LOCAL_API_KEY:-}
-      # The Telegram Channel's bot.
+      # Bot token used by the Telegram Channel.
       TG_TOKEN: ${TG_TOKEN:?copy .env.example to .env and put the bot token in it}
       DATABASE_URL: *database-url
       PUBLIC_HOST: 0.0.0.0

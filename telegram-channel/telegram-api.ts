@@ -6,8 +6,8 @@ export type TelegramUpdate = {
     readonly message_id: number;
     readonly text?: string;
     readonly chat: { readonly id: number; readonly type: string };
-    // Telegram requires `first_name` of a user and not `username`, so it is the name most people
-    // can be called by. Optional here all the same: nothing validates the cast below.
+    // Telegram requires first_name but makes username optional. Treat first_name as optional
+    // here too because the API response is cast to this type without runtime validation.
     readonly from?: {
       readonly id: number;
       readonly username?: string;
@@ -81,13 +81,13 @@ export function createTelegramApi(token: string, baseUrl = "https://api.telegram
       return call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message"] }, bounded);
     },
 
-    // `replyTo` attaches the answer to the question it answers. Only the first chunk carries it:
-    // a long answer is rare, another message landing between two chunks of one rarer still, and
-    // quoting on every chunk would repeat the question down the room.
+    // Use `replyTo` to quote the original question on the first part of an answer.
+    // Long answers are uncommon, and another message is unlikely to arrive between their parts.
+    // Quoting only the first part avoids repeating the question throughout the chat.
     //
-    // `allow_sending_without_reply` because the question may have been deleted by the time the
-    // answer is ready. Telegram refuses the send outright otherwise, with a 4xx this Channel reads
-    // as permanent, which would drop the answer rather than the quote.
+    // Set `allow_sending_without_reply` so the answer can still be sent if the original question
+    // has been deleted. Otherwise, Telegram returns a 4xx error that this Channel treats as
+    // permanent, and the answer would never be delivered.
     async sendMessage(
       chatId: string,
       text: string,
