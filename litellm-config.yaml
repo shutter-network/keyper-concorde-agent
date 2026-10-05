@@ -1,0 +1,20 @@
+# The proxy's whole configuration. It is the only place a model credential is named, and the
+# agent container never sees one: `models.json` points pi here, and LiteLLM sets the real header
+# on the way out.
+
+model_list:
+  # Anyone running Anthropic. The prefix is matched before the catch-all below, so every Claude
+  # model goes to Anthropic with the Anthropic key and none of them reaches the local endpoint.
+  - model_name: "claude-*"
+    litellm_params:
+      model: anthropic/claude-*
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Everything else, which is whatever `switch-model.sh` last wrote into `models.json`. The id is
+  # forwarded upstream unchanged, so switching models stays a change to two files and never to
+  # this one.
+  - model_name: "*"
+    litellm_params:
+      model: openai/*
+      api_base: os.environ/LOCAL_API_BASE
+      api_key: os.environ/LOCAL_API_KEY
