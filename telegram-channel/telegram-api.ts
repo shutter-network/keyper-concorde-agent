@@ -30,9 +30,13 @@ export class TelegramApiError extends Error {
     this.retryAfter = retryAfter;
   }
 
-  // A 4xx other than 429 means the request itself is wrong, and repeating it changes nothing.
+  // A 4xx other than 429 means the request itself is wrong, and repeating it changes nothing --
+  // except 401, which is the bot token being wrong or rotated rather than the request, and is
+  // fixable. Treat it as transient so its Messages wait in the outbox and go out on the next drain
+  // once the token is restored, instead of being marked permanently failed the moment it lapses.
   get permanent(): boolean {
-    return this.code >= 400 && this.code < 500 && this.code !== 429;
+    if (this.code === 429 || this.code === 401) return false;
+    return this.code >= 400 && this.code < 500;
   }
 }
 
