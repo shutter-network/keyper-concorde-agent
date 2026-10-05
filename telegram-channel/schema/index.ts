@@ -41,4 +41,17 @@ export const outbox = telegramChannelSchema.table("outbox", {
   failedAt: timestamp("failed_at", { withTimezone: true }),
 });
 
-export const telegramChannelTables = { chats, received, outbox };
+// What Telegram said about the message that became one inbound Message: its sender, chat and
+// message id. Written in the Message's own transaction; a null sender is Telegram naming nobody.
+export const senders = telegramChannelSchema.table("senders", {
+  messageId: uuid("message_id").primaryKey(),
+  senderId: text("sender_id"),
+  username: text("username"),
+  chatId: text("chat_id").notNull(),
+  telegramMessageId: text("telegram_message_id").notNull(),
+  recordedAt: timestamp("recorded_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+
+export const telegramChannelTables = { chats, received, outbox, senders };

@@ -26,6 +26,7 @@ import {
   UnrecordedChatError,
 } from "./outbound.ts";
 import { received, telegramChannelTables } from "./schema/index.ts";
+import { insertSender, selectSenderFor, type TelegramSender } from "./senders.ts";
 import { createTelegramApi, TelegramApiError, type TelegramUpdate } from "./telegram-api.ts";
 
 const channelName = "telegram";
@@ -57,6 +58,12 @@ export type TelegramChannel = Channel & {
     tx: Handle<TSchema>,
     userId: string,
   ): Promise<string | undefined>;
+
+  /** What Telegram said about this Message: its sender, chat and message id, or undefined. */
+  senderOf<TSchema extends Record<string, unknown>>(
+    tx: Handle<TSchema>,
+    messageId: string,
+  ): Promise<TelegramSender | undefined>;
 
   /** Push whatever is queued to Telegram now. Tests call it; a deployment does not need to. */
   drain(): Promise<void>;
@@ -107,7 +114,14 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
         .onConflictDoNothing()
         .returning({ updateId: received.updateId });
       if (claimed === undefined) return false;
-      await inbound.receive(tx, userId, text);
+      const record = await inbound.receive(tx, userId, text);
+      // The same transaction, so the Message and what Telegram said about it commit together.
+      await insertSender(tx, record.id, {
+        senderId: message.from === undefined ? null : String(message.from.id),
+        username: message.from?.username ?? null,
+        chatId,
+        telegramMessageId: String(message.message_id),
+      });
       return true;
     });
     if (stored) log.info({ update: update.update_id, userId }, "a Telegram message became a Message");
@@ -194,6 +208,7 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
     name: channelName,
     recordChat: (tx, userId, chatId) => insertChat(tx, userId, chatId),
     chatOf: (tx, userId) => selectChatFor(tx, userId),
+    senderOf: (tx, messageId) => selectSenderFor(tx, messageId),
     send: async (tx, message: MessageRecord) => {
       const chatId = await selectChatFor(tx, message.userId);
       if (chatId === undefined) throw new UnrecordedChatError(message.userId);
