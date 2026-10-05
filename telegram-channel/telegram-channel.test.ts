@@ -400,6 +400,53 @@ describe("outbound", () => {
     });
   });
 
+  it("a transient failure on a middle chunk resumes without re-sending earlier chunks", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      // 10000 chars split into [4096, 4096, 1808]. Fail the 2nd sendMessage once so the middle
+      // chunk fails after the first is accepted. Driving drains to completion, each chunk must be
+      // delivered exactly once -- chunk 1 is never re-sent.
+      api.failSendOnce(chatId, 2, { code: 500, description: "Internal Server Error" });
+      const text = "a".repeat(10000);
+      await db.tx((tx) => messenger.send(tx, userId, text));
+      await waitUntil("the reply was fully delivered", async () => {
+        await channel.drain();
+        return (await outboxRows(userId)).length === 0;
+      });
+      const parts = sentTo(api, chatId).map((m) => m.text);
+      assert.deepEqual(parts.map((p) => p.length), [4096, 4096, 1808]);
+      assert.equal(parts.join(""), text);
+    });
+  });
+
+  it("a partial multi-chunk reply survives a restart and is not re-sent", async () => {
+    await withDeployment(async ({ api, messenger, channel }) => {
+      const { userId, chatId } = await admit(channel);
+      // Block every chunk from the 2nd on, so the reply stays partly delivered (chunk 1 sent,
+      // progress persisted) however many drains run -- a deterministic partial state.
+      api.failSendFrom(chatId, 2, { code: 500, description: "Internal Server Error" });
+      const text = "a".repeat(10000);
+      await db.tx((tx) => messenger.send(tx, userId, text));
+      await waitUntil("chunk 1 is delivered and progress is persisted", async () => {
+        await channel.drain();
+        const [row] = await outboxRows(userId);
+        return row !== undefined && row.sentParts === 1;
+      });
+      // Restart with the block cleared. Resume must come from the offset on disk, so the surviving
+      // chunks go out and chunk 1 -- already delivered before the restart -- is not re-sent.
+      await channel.stop();
+      api.failSendFrom(chatId, undefined);
+      await channel.start();
+      await waitUntil("the reply was delivered after the restart", async () => {
+        await channel.drain();
+        return (await outboxRows(userId)).length === 0;
+      });
+      const parts = sentTo(api, chatId).map((m) => m.text);
+      assert.deepEqual(parts.map((p) => p.length), [4096, 4096, 1808]);
+      assert.equal(parts.join(""), text);
+    });
+  });
+
   it("a reply queued while stopped goes out at the next start", async () => {
     const api = await startFakeBotApi();
     const { messenger, channel } = deploymentFor(api);

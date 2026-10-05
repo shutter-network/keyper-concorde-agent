@@ -26,6 +26,10 @@ export type FakeBotApi = {
   push(update: TelegramUpdate): void;
   /** Refuse sendMessage to this chat with this error, or stop refusing with `undefined`. */
   refuse(chatId: string, refusal: Refusal | undefined): void;
+  /** Refuse the `nthCall`-th sendMessage to this chat once (1-based), then behave normally. */
+  failSendOnce(chatId: string, nthCall: number, refusal: Refusal): void;
+  /** Refuse every sendMessage to this chat from the `nthCall`-th on; `undefined` clears it. */
+  failSendFrom(chatId: string, nthCall: number | undefined, refusal?: Refusal): void;
   /** Answer every getUpdates with this error, or stop with `undefined`. */
   failPolls(refusal: Refusal | undefined): void;
   stop(): Promise<void>;
@@ -36,6 +40,9 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
   const sent: SentMessage[] = [];
   const refused: SentMessage[] = [];
   const refusals = new Map<string, Refusal>();
+  const failOnce = new Map<string, { call: number; refusal: Refusal }>();
+  const failFrom = new Map<string, { call: number; refusal: Refusal }>();
+  const attempts = new Map<string, number>();
   let pollFailure: Refusal | undefined;
 
   const server: Server = createServer(async (request, response) => {
@@ -61,7 +68,16 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
 
     if (method === "sendMessage") {
       const message = { chatId: String(body.chat_id), text: String(body.text) };
-      const refusal = refusals.get(message.chatId);
+      const attempt = (attempts.get(message.chatId) ?? 0) + 1;
+      attempts.set(message.chatId, attempt);
+      let refusal = refusals.get(message.chatId);
+      const scheduled = failOnce.get(message.chatId);
+      if (scheduled !== undefined && scheduled.call === attempt) {
+        failOnce.delete(message.chatId);
+        refusal = scheduled.refusal;
+      }
+      const ongoing = failFrom.get(message.chatId);
+      if (ongoing !== undefined && attempt >= ongoing.call) refusal = ongoing.refusal;
       if (refusal !== undefined) {
         refused.push(message);
         return answerRefusal(response, refusal);
@@ -91,6 +107,13 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
     refuse: (chatId, refusal) => {
       if (refusal === undefined) refusals.delete(chatId);
       else refusals.set(chatId, refusal);
+    },
+    failSendOnce: (chatId, nthCall, refusal) => {
+      failOnce.set(chatId, { call: nthCall, refusal });
+    },
+    failSendFrom: (chatId, nthCall, refusal) => {
+      if (nthCall === undefined || refusal === undefined) failFrom.delete(chatId);
+      else failFrom.set(chatId, { call: nthCall, refusal });
     },
     failPolls: (refusal) => {
       pollFailure = refusal;
