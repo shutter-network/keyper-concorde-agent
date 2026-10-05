@@ -11,8 +11,6 @@ import type { TelegramUpdate } from "./telegram-api.ts";
 export type SentMessage = {
   readonly chatId: string;
   readonly text: string;
-  readonly replyTo: string | undefined;
-  readonly allowWithoutReply: boolean;
 };
 
 export type Refusal = {
@@ -68,8 +66,6 @@ export async function startFakeBotApi(): Promise<FakeBotApi> {
       const message = {
         chatId: String(body.chat_id),
         text: String(body.text),
-        replyTo: body.reply_to_message_id === undefined ? undefined : String(body.reply_to_message_id),
-        allowWithoutReply: body.allow_sending_without_reply === true,
       };
       const refusal = refusals.get(message.chatId);
       if (refusal !== undefined) {

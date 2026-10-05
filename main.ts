@@ -77,7 +77,6 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
         data: async (signal) => {
           const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
           const user = await users.get(signal.payload.userId);
-          telegram.expectReplyTo(signal.payload.userId, sender?.telegramMessageId ?? null);
           return promptData(signal.payload, sender, user?.attributes);
         },
       }),

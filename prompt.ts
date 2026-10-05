@@ -1,7 +1,6 @@
 // Build the information passed to the agent for an incoming Message.
 //
 // Include the sender's role (operator or teammate), but not their username or sender ID.
-// Replies quote the original question so the group can see which message is being answered.
 // Usernames typed into the message text still reach the model.
 //
 // Keep this module separate so tests can import it without starting the Gateway in main.ts.

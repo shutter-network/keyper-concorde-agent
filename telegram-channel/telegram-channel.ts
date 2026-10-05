@@ -75,13 +75,6 @@ export type TelegramChannel = Channel & {
     messageId: string,
   ): Promise<TelegramSender | undefined>;
 
-  /**
-   * Set the Telegram message that this User's next reply should quote. Pass null to clear it.
-   * Set this when claiming the Signal so the reply quotes the message that triggered the Run,
-   * even if another message arrives before the Run finishes.
-   */
-  expectReplyTo(userId: string, telegramMessageId: string | null): void;
-
   /** Push whatever is queued to Telegram now. Tests call it; a deployment does not need to. */
   drain(): Promise<void>;
 };
@@ -99,16 +92,6 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
   let listening: Listening | undefined;
   let draining: Promise<void> = Promise.resolve();
   let ticker: ReturnType<typeof setInterval> | undefined;
-  // Track the message that each User's replies should quote. This map only needs to last from
-  // when a Signal is claimed until its Run responds, which happens in the same process.
-  // Queued replies also save the target ID in the outbox, so delivery after a restart still
-  // quotes the correct message.
-  //
-  // Keep the target after sending a reply and replace it when the next Signal is claimed.
-  // This lets multiple replies from one Run, including a failure notice from the post phase,
-  // quote the same original question.
-  const replyTargets = new Map<string, string>();
-
   // Reply directly to a rejected chat without creating a Message or outbox row.
   // Send a reply for each incoming message because rejected chats are not remembered.
   async function tell(chatId: string, text: string, signal: AbortSignal): Promise<void> {
@@ -200,7 +183,7 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
   // True when the drain may continue to the next row.
   async function deliver(row: OutboxRow, signal: AbortSignal): Promise<boolean> {
     try {
-      await api.sendMessage(row.chatId, row.text, signal, row.replyTo ?? undefined);
+      await api.sendMessage(row.chatId, row.text, signal);
     } catch (error) {
       if (signal.aborted) return false;
       if (error instanceof TelegramApiError && error.permanent) {
@@ -218,12 +201,7 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
       return false;
     }
     await deleteSent(handle, row.messageId);
-    // Log `replyTo` because the outbox row is deleted after a successful send.
-    // The log preserves which original message the delivered reply quoted.
-    log.info(
-      { message: row.messageId, userId: row.userId, replyTo: row.replyTo },
-      "a Message reached Telegram",
-    );
+    log.info({ message: row.messageId, userId: row.userId }, "a Message reached Telegram");
     return true;
   }
 
@@ -260,10 +238,6 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
     recordChat: (tx, userId, chatId) => insertChat(tx, userId, chatId),
     chatOf: (tx, userId) => selectChatFor(tx, userId),
     senderOf: (tx, messageId) => selectSenderFor(tx, messageId),
-    expectReplyTo: (userId, telegramMessageId) => {
-      if (telegramMessageId === null) replyTargets.delete(userId);
-      else replyTargets.set(userId, telegramMessageId);
-    },
     send: async (tx, message: MessageRecord) => {
       const chatId = await selectChatFor(tx, message.userId);
       if (chatId === undefined) throw new UnrecordedChatError(message.userId);
@@ -272,7 +246,6 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
         userId: message.userId,
         chatId,
         text: message.text,
-        replyTo: replyTargets.get(message.userId) ?? null,
       });
     },
     drain,

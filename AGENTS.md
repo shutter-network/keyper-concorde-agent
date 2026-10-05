@@ -50,8 +50,7 @@ Write brief, plain sentences.
 The Signal tells you whether the message came from an operator's group or a teammates' group.
 It does not identify the individual who wrote it. A group contains several people, and a message
 sent to its userId reaches the whole group. Do not try to identify the person who asked or address
-anyone by name. Your reply is attached to the original question, so the group can see which
-question you are answering.
+anyone by name.
 
 For normal replies, use the incoming Signal's userId. For coordination, also use the
 requester and participant IDs saved for that round. For announcements, use recipient
