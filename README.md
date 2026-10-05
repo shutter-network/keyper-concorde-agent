@@ -39,8 +39,8 @@ When the package is published, `package.json` goes back to `"^0.1.0"` and `vendo
    it as `$LOCAL_API_KEY`.
 4. If another process polls the same bot token, stop it first. Telegram hands each update to
    one poller, and the Channel logs a 409 until the other one is gone.
-5. Keep group privacy **on** in BotFather. The bot is then woken only by an
-   @mention or a reply to one of its own messages, rather than by every message in every room.
+5. Keep group privacy **on** in BotFather. The bot is then woken only by a slash command
+   or a reply to one of its own messages, rather than by every message in every room.
 6. In each keyper group, restrict who may post so that only the operator can. That decides who
    *may* write; `add-operator` records *which sender id* they are, so the agent can be told whether
    an operator or a teammate wrote.
@@ -135,16 +135,14 @@ supergroup: the cause differs, the fix does not.
 The teammate chat can set two things in motion across every keyper room. A keyper room cannot ask
 for either; the agent turns it back.
 
-**Announcements.** One message to each keyper's own room, and nothing is waited for. Name a
-keyperset and the agent works out its members from the dashboard's `deployment` label, then writes
-only to those rooms. A keyper outside the set is not written to, and one with no room is named back
-to you so a short fan-out is visible.
+**Announcements.** One message to each keyper's own room, and nothing is waited for. The teammate
+chat supplies the text; the agent writes it to every keyper room and reports which sends succeeded.
 
 **Rounds.** Ask every operator of a keyperset for a time window. The agent asks each room, collects
 the replies as they come, and reports to the teammate chat once all of them are in. If the windows
 do not all overlap it says so and asks what to do; it never picks a time itself.
 
-Both are driven entirely by `AGENTS.md`. The agent uses `GET /users/` to find the rooms, 
+Both are driven entirely by `AGENTS.md`. The agent uses `GET /users/` to find the rooms,
 `POST /messages/` to write, and keeps round state in a file at `/workspace/coordination.json`.
 
 ## Tests
