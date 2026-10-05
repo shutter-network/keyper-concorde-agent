@@ -119,8 +119,8 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
       try {
         const updates = await api.getUpdates(offset, pollTimeout, signal);
         for (const update of updates) {
-          offset = update.update_id + 1;
           await admit(update, signal);
+          offset = update.update_id + 1;
         }
       } catch (error) {
         if (signal.aborted) return;
