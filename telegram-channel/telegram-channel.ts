@@ -162,8 +162,10 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
       try {
         const updates = await api.getUpdates(offset, pollTimeout, signal);
         for (const update of updates) {
-          offset = update.update_id + 1;
+          // Advance only after the update is stored. Advancing first would drop an update whose
+          // admit threw, because Telegram never offers it again.
           await admit(update, signal);
+          offset = update.update_id + 1;
         }
       } catch (error) {
         if (signal.aborted) return;
