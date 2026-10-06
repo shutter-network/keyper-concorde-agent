@@ -5,12 +5,14 @@ import { senders } from "./schema/index.ts";
 export type TelegramSender = {
   readonly senderId: string | null;
   readonly username: string | null;
+  readonly firstName: string | null;
   readonly chatId: string;
+  readonly chatType: string;
   readonly telegramMessageId: string;
 };
 
-// No conflict clause, unlike `received`: that claim already absorbed the redelivery earlier in this
-// transaction, so a second row here is an invariant violation and raising rolls the Message back.
+// Do not ignore duplicate rows here. The `received` check already filters repeated updates
+// in this transaction. A duplicate sender record indicates a bug and must roll back the Message.
 export async function insertSender<TSchema extends Record<string, unknown>>(
   handle: Handle<TSchema>,
   messageId: string,
@@ -27,7 +29,9 @@ export async function selectSenderFor<TSchema extends Record<string, unknown>>(
     .select({
       senderId: senders.senderId,
       username: senders.username,
+      firstName: senders.firstName,
       chatId: senders.chatId,
+      chatType: senders.chatType,
       telegramMessageId: senders.telegramMessageId,
     })
     .from(senders)
