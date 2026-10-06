@@ -57,9 +57,11 @@ arrives. Register a group as below, then write in it and the reply comes back to
 
 ## Groups
 
-A room is one user. A **keyper room** covers one keyper and only its operator writes there;
-teammates are in it and read. The **teammate chat** covers none, holds teammates, and any keyper may
-be asked about. Every reply reaches everyone in the room it is sent to.
+A room is one user. A **keyper room** covers a set of keypers and holds the operators who run them,
+and all of them answer for every keyper the room covers. Only they write
+there; teammates are in it and read. The **teammate chat** covers none, holds
+teammates, and any keyper may be asked about. Every reply reaches everyone in the room it is sent to.
+A keyper is identified by its **instance and keyperset**.
 
 Two separate things decide the operator. Telegram's posting permission decides who **may** write in
 a keyper room; `add-operator` records **which sender id** that human is, so the agent can be told
@@ -77,7 +79,9 @@ running:
 
 ```sh
 docker compose run --rm --no-deps gateway node admin.ts list-chats
-docker compose run --rm --no-deps gateway node admin.ts add-keyper-chat <name> <chatId> <keyper> [operatorSenderId]
+docker compose run --rm --no-deps gateway node admin.ts add-keyper-chat <name> <chatId> <instance>:<set> ... [--operator <id>[,<id>...]]
+docker compose run --rm --no-deps gateway node admin.ts add-keypers <chatId> <instance>:<set> ...
+docker compose run --rm --no-deps gateway node admin.ts remove-keypers <chatId>
 docker compose run --rm --no-deps gateway node admin.ts add-teammate-chat <name> <chatId>
 docker compose run --rm --no-deps gateway node admin.ts list-members <chatId>
 docker compose run --rm --no-deps gateway node admin.ts add-operator <chatId> <senderId>
@@ -89,7 +93,9 @@ docker compose run --rm --no-deps gateway node admin.ts remove-chat <chatId>
 | command | what it does |
 |---|---|
 | `list-chats` | one line per chat: chat id, kind, name, what it covers, operators, user id |
-| `add-keyper-chat` | creates a **keyper chat**: one keyper, written in only by its operator. One transaction, so a chat nobody can reach never exists. |
+| `add-keyper-chat` | creates a **keyper chat**: a set of keypers, written in only by their operators. `<name>` names those operators. One transaction, so a chat nobody can reach never exists. |
+| `add-keypers` | adds any number of keypers to an existing chat and leaves the rest alone. A pair the chat already holds is kept once. |
+| `remove-keypers` | clears the chat's whole list. It covers nothing until `add-keypers` runs, so the two go together when changing a group. |
 | `add-teammate-chat` | creates a **teammate chat**: no keyper, written in by teammates, any keyper may be asked about. Its own command so the kind is typed rather than arrived at by omitting an argument. |
 | `list-members` | everyone who has written to that room: sender id, `@handle` or first name, role, when. Plus any recorded operator who has not written. A reader is invisible: Telegram names a sender only on a message. |
 | `add-operator` / `remove-operator` | records which sender id is the operator. Warns if they have never written there, but records them anyway. |
@@ -103,21 +109,26 @@ Roles carry no privilege. The agent answers an operator and a teammate identical
 exists so it can name who runs the keyper, and so the log carries that afterwards.
 
 **What a question may be about follows the room, not the role.** In a keyper room the agent answers
-about that room's keyper only, and a question about another is turned back with the name of the
-keyper this room covers. In the teammate chat it answers about whichever keyper the question names,
+about that room's keypers only, and a question about another is turned back with the names of the
+keypers this room covers. In the teammate chat it answers about whichever keyper the question names,
 and asks which one if the question names none. So the same person asking the same question gets an
 answer in one room and a redirection in the other. The room decides, not who they are. That scope
 is **soft**: it is an instruction in `AGENTS.md` and nothing more.
 
-### One chat per keyper, and moving it
+### One chat per operator, and moving it
 
-A keyper has exactly **one** chat, and `add-keyper-chat` **refuses** a second. Two rooms covering one
-keyper means two places its operators are written to and two places they answer from, with nothing to
-say which one is the keyper's.
+A room belongs to one set of operators and covers every keyper they run, so a keyper is reached in
+exactly one place. Concretely: an `(instance, set)` pair has exactly **one** chat, and the add
+commands **refuse** a second. Two rooms holding one pair means two places its operators are written
+to and two places they answer from, with nothing to say which one is the keyper's.
 
-**To move a keyper to a different group, do not register it again.** `add-keyper-chat` creates a
+Adding a keyper to an operator who already has a room is `add-keypers` on that room, not a second
+room. A second room would split their keypers across two places, and a round would then wait on
+both.
+
+**To move a whole room to a different chat, do not register it again.** `add-keyper-chat` creates a
 *new* user, stranding the old one's message log, its recorded operators and its history. Move it
-instead. The refusal prints the two commands with the ids already filled in:
+instead:
 
 ```sh
 admin.ts list-chats                     # note the user id, last column
@@ -125,7 +136,7 @@ admin.ts remove-chat <oldChatId>
 admin.ts attach-chat <userId> <newChatId>
 ```
 
-The user, its keyper, its operators and its whole log come with it.
+The user, its keypers, its operators and its whole log come with it.
 
 This is also the recovery when **Telegram changes a group's id** on upgrading a basic group to a
 supergroup: the cause differs, the fix does not.

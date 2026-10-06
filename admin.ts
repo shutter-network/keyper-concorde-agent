@@ -1,7 +1,9 @@
 // Operator commands against the database. The gateway does not need to be running.
 //
 //   docker compose run --rm --no-deps gateway node admin.ts list-chats
-//   docker compose run --rm --no-deps gateway node admin.ts add-keyper-chat <name> <chatId> <keyper> [operator]
+//   docker compose run --rm --no-deps gateway node admin.ts add-keyper-chat <name> <chatId> <instance>:<set> ... [--operator <id>[,<id>...]]
+//   docker compose run --rm --no-deps gateway node admin.ts add-keypers <chatId> <instance>:<set> ...
+//   docker compose run --rm --no-deps gateway node admin.ts remove-keypers <chatId>
 //   docker compose run --rm --no-deps gateway node admin.ts add-teammate-chat <name> <chatId>
 //   docker compose run --rm --no-deps gateway node admin.ts remove-chat <chatId>
 //   docker compose run --rm --no-deps gateway node admin.ts attach-chat <userId> <chatId>
@@ -9,8 +11,14 @@
 //   docker compose run --rm --no-deps gateway node admin.ts add-operator <chatId> <senderId>
 //   docker compose run --rm --no-deps gateway node admin.ts remove-operator <chatId> <senderId>
 //
-// A keyper chat is assigned to one keyper. A teammate chat is for the team and has no keyper.
-// Store the chat kind explicitly because only teammate chats may request actions for all keypers.
+// A keyper chat covers a set of keypers and holds the operators who run them, of whom there may be
+// several. A teammate chat is for the team and covers none. Store the chat kind explicitly because only teammate chats may request actions for all
+// keypers.
+//
+// A keyper is identified by `(instance, set)`, the same pair the metrics and logs use: one machine
+// taking part in one keyperset. A machine in two keypersets is two entries, and the pair is what
+// must not be held by two groups. The same instance in two groups under different sets is allowed
+// but warned about, because a machine is normally run by one group in every set it joins.
 // Both add commands create the User, set its name and kind, and link its Telegram chat in one
 // transaction. This prevents partially registered groups that cannot receive messages.
 //
@@ -32,6 +40,7 @@ import { eq } from "drizzle-orm";
 import { openDb } from "@shutter-network/concorde/db";
 import { createUsers } from "@shutter-network/concorde/users";
 import { insertChat } from "./telegram-channel/chats.ts";
+import { type KeyperRef, type KeyperSet, keyperSets } from "./prompt.ts";
 import { chats, senders, telegramChannelTables } from "./telegram-channel/schema/index.ts";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -42,17 +51,106 @@ const users = createUsers({ db });
 const handle = db.handle(telegramChannelTables);
 const [command, ...args] = process.argv.slice(2);
 
+// `keyperSets` comes from prompt.ts so the list the agent is told about and the list this command
+// accepts cannot drift apart. A value outside it is refused rather than stored.
 type GroupAttributes = {
   readonly kind?: "keyper" | "teammate";
   readonly name?: string;
-  readonly keyper?: string;
+  readonly keypers?: readonly KeyperRef[];
   readonly operators?: readonly string[];
 };
+
+const isKeyperSet = (value: string): value is KeyperSet =>
+  (keyperSets as readonly string[]).includes(value);
+
+const describePair = (keyper: KeyperRef): string => `${keyper.instance}/${keyper.set}`;
+
+/** One entry per machine, so a machine in two keypersets reads as one thing rather than two. */
+function describeKeypers(keypers: readonly KeyperRef[]): string {
+  if (keypers.length === 0) return "(none bound)";
+  const sets = new Map<string, string[]>();
+  for (const { instance, set } of keypers) {
+    sets.set(instance, [...(sets.get(instance) ?? []), set]);
+  }
+  return [...sets].map(([instance, its]) => `${instance}[${its.join(",")}]`).join(" ");
+}
+
+function keypersOf(user: { attributes: unknown }): readonly KeyperRef[] {
+  const { keypers } = attributesOf(user);
+  return Array.isArray(keypers) ? keypers : [];
+}
+
+/** `kpr-example:api` into a pair. Rejects an unknown keyperset, so a typo cannot be stored. */
+function parsePairs(raw: readonly string[]): KeyperRef[] {
+  if (raw.length === 0) usage();
+  const parsed: KeyperRef[] = [];
+  for (const arg of raw) {
+    // Split on the last colon: an instance name may contain one, a keyperset never does.
+    const at = arg.lastIndexOf(":");
+    if (at <= 0 || at === arg.length - 1) {
+      console.error(`"${arg}" is not <instance>:<set>`);
+      process.exit(1);
+    }
+    const instance = arg.slice(0, at);
+    const set = arg.slice(at + 1);
+    if (!isKeyperSet(set)) {
+      console.error(`"${set}" is not a keyperset; use ${keyperSets.join(" or ")}`);
+      process.exit(1);
+    }
+    if (parsed.some((one) => one.instance === instance && one.set === set)) {
+      console.error(`${instance}/${set} is listed twice`);
+      process.exit(1);
+    }
+    parsed.push({ instance, set });
+  }
+  return parsed;
+}
+
+/**
+ * Refuses a pair another group already holds, because messages and replies would then be split
+ * between two groups with no clear choice of which to use. Warns, but allows, the same instance in
+ * another group under a different keyperset: the operator is normally the same for every set a
+ * machine joins, so that is worth seeing when it happens rather than forbidding.
+ */
+async function assertAssignable(pairs: readonly KeyperRef[], selfUserId?: string): Promise<void> {
+  const others = (await users.list()).filter(
+    (one) => one.id !== selfUserId && attributesOf(one).kind === "keyper",
+  );
+  for (const pair of pairs) {
+    for (const other of others) {
+      const name = attributesOf(other).name ?? "unnamed";
+      const held = keypersOf(other);
+      if (held.some((one) => one.instance === pair.instance && one.set === pair.set)) {
+        console.error(
+          `${describePair(pair)} is already held by user ${other.id} (${name}); nothing was changed.\n` +
+            `To move it, run remove-keypers on that group's chat, then add-keypers the ones that stay.`,
+        );
+        process.exit(1);
+      }
+      if (held.some((one) => one.instance === pair.instance)) {
+        console.warn(
+          `warning: ${pair.instance} is also held by user ${other.id} (${name}) in another keyperset`,
+        );
+      }
+    }
+  }
+}
+
+/** Pulls `--name value` out of the arguments, so the pair list can stay variadic and last. */
+function takeOption(argv: readonly string[], option: string): { value?: string; rest: string[] } {
+  const at = argv.indexOf(option);
+  if (at === -1) return { rest: [...argv] };
+  const value = argv[at + 1];
+  if (value === undefined) usage();
+  return { value, rest: [...argv.slice(0, at), ...argv.slice(at + 2)] };
+}
 
 function usage(): never {
   console.error(
     "usage: node admin.ts list-chats\n" +
-      "       node admin.ts add-keyper-chat <name> <chatId> <keyper> [operatorSenderId]\n" +
+      "       node admin.ts add-keyper-chat <name> <chatId> <instance>:<set> ... [--operator <id>[,<id>...]]\n" +
+      "       node admin.ts add-keypers <chatId> <instance>:<set> ...\n" +
+      "       node admin.ts remove-keypers <chatId>\n" +
       "       node admin.ts add-teammate-chat <name> <chatId>\n" +
       "       node admin.ts remove-chat <chatId>\n" +
       "       node admin.ts attach-chat <userId> <chatId>\n" +
@@ -97,8 +195,8 @@ try {
     case "list-chats": {
       const chatOf = new Map((await handle.select().from(chats)).map((r) => [r.userId, r.chatId]));
       for (const user of await users.list()) {
-        const { kind = "?", name = "", keyper, operators = [] } = attributesOf(user);
-        const covers = kind === "teammate" ? "teammates" : `keyper ${keyper ?? "(none bound)"}`;
+        const { kind = "?", name = "", operators = [] } = attributesOf(user);
+        const covers = kind === "teammate" ? "teammates" : describeKeypers(keypersOf(user));
         console.log(
           `${(chatOf.get(user.id) ?? "-").padEnd(16)}  ${kind.padEnd(8)}  ${name.padEnd(24)}  ${covers.padEnd(28)}  operators ${operators.join(",") || "-"}  ${user.id}`,
         );
@@ -106,43 +204,83 @@ try {
       break;
     }
 
+    // `name` names the operators, not a keyper: one group covers every keyper they run between them.
+    // The keyper list is variadic and last, so the operator is given as an option rather than a
+    // trailing argument, which would be indistinguishable from another keyper.
     case "add-keyper-chat": {
-      const [name, chatId, keyper, operator] = args;
-      if (name === undefined || chatId === undefined || keyper === undefined) usage();
+      const { value: given, rest } = takeOption(args, "--operator");
+      const [name, chatId, ...pairArgs] = rest;
+      if (name === undefined || chatId === undefined) usage();
+      // A group may have several operators, so `--operator` takes a comma-separated list.
+      const operators = [
+        ...new Set(
+          (given ?? "")
+            .split(",")
+            .map((one) => one.trim())
+            .filter((one) => one !== ""),
+        ),
+      ];
       // Telegram group IDs are normally negative, but this is not a documented guarantee.
       // Only warn here; the Channel separately rejects private chats based on their chat type.
       if (!chatId.startsWith("-")) {
         console.warn(`warning: ${chatId} is positive, and a Telegram group's id is negative`);
       }
-      // Reject a second chat for the same keyper. Otherwise, messages and replies could be split
-      // between two groups with no clear choice of which group to use. To move a keyper, attach
-      // the new chat to the existing User. Registering again creates a new User and leaves the
-      // message history and operator records attached to the old one.
-      const already = (await users.list()).filter((u) => {
-        const a = attributesOf(u);
-        return a.kind === "keyper" && a.keyper === keyper;
-      });
-      if (already.length > 0) {
-        const [held] = already;
-        console.error(
-          `${keyper} already has a chat, held by user ${held.id} (${attributesOf(held).name ?? "unnamed"}); nothing was added.\n` +
-            `To move it to another group:  remove-chat <its chat id>  then  attach-chat ${held.id} ${chatId}`,
-        );
-        process.exit(1);
-      }
+      const keypers = parsePairs(pairArgs);
+      await assertAssignable(keypers);
       const id = await db.tx(async (tx) => {
         const user = await users.create(tx);
         await users.setAttributes(tx, user.id, {
           kind: "keyper",
           name,
-          keyper,
-          operators: operator === undefined ? [] : [operator],
+          keypers,
+          operators,
         });
         await insertChat(tx, user.id, chatId);
         return user.id;
       });
-      console.log(`user ${id} (${name}) covers keyper ${keyper} on chat ${chatId}`);
-      if (operator !== undefined) console.log(`operator ${operator} recorded`);
+      console.log(`user ${id} (${name}) covers ${describeKeypers(keypers)} on chat ${chatId}`);
+      if (operators.length > 0) console.log(`operators recorded: ${operators.join(",")}`);
+      break;
+    }
+
+    // Clears the list. The group covers nothing until `add-keypers` runs, and every message it
+    // sends fails until then, so the two are run together when a group is being changed.
+    case "remove-keypers": {
+      const [chatId] = args;
+      if (chatId === undefined) usage();
+      const userId = await userFor(chatId);
+      if (attributesOf((await users.get(userId))!).kind !== "keyper") {
+        console.error(`chat ${chatId} is not a keyper group; nothing was changed`);
+        process.exit(1);
+      }
+      const removed = keypersOf((await users.get(userId))!);
+      await amendAttributes(userId, (current) => ({ ...current, keypers: [] }));
+      console.log(
+        `chat ${chatId} no longer covers ${describeKeypers(removed)}; run add-keypers before it is messaged again`,
+      );
+      break;
+    }
+
+    // Adds to the list and leaves the rest alone. A pair already held by this group is kept once.
+    case "add-keypers": {
+      const [chatId, ...pairArgs] = args;
+      if (chatId === undefined) usage();
+      const userId = await userFor(chatId);
+      const user = (await users.get(userId))!;
+      if (attributesOf(user).kind !== "keyper") {
+        console.error(`chat ${chatId} is not a keyper group; nothing was changed`);
+        process.exit(1);
+      }
+      const adding = parsePairs(pairArgs);
+      await assertAssignable(adding, userId);
+      const next = await amendAttributes(userId, (current) => {
+        const held = Array.isArray(current.keypers) ? current.keypers : [];
+        const fresh = adding.filter(
+          (one) => !held.some((kept) => kept.instance === one.instance && kept.set === one.set),
+        );
+        return { ...current, keypers: [...held, ...fresh] };
+      });
+      console.log(`chat ${chatId} now covers ${describeKeypers(next.keypers ?? [])}`);
       break;
     }
 

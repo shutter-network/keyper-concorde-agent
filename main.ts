@@ -12,7 +12,7 @@ import {
   templateHandler,
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
-import { promptData } from "./prompt.ts";
+import { describeCoverage, type KeyperRef, promptData } from "./prompt.ts";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
 
 const tokenTtl = 30 * 24 * 60 * 60 * 1000;
@@ -67,7 +67,7 @@ const gateway = createGateway({
   handlers: ({ db, messenger, telegram, users }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived from {{#if keyper}}the group for keyper {{keyper}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
+        template: `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
 
 {{text}}
 
@@ -101,18 +101,22 @@ await gateway.start();
 // Do not create default Users at startup. Register groups through `admin.ts`, which saves
 // the chat link and any keyper assignment together. This avoids creating Users that cannot
 // receive messages or keyper groups with no assigned keyper.
+//
+// Name a keyper group that covers nothing. Such a group raises UnboundGroupError on every message
+// it sends, so saying so at boot turns a silent runtime failure into one line in the log.
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {
-  const { name, kind, keyper } = (group.attributes ?? {}) as {
+  const { name, kind, keypers } = (group.attributes ?? {}) as {
     name?: string;
     kind?: string;
-    keyper?: string;
+    keypers?: readonly KeyperRef[];
   };
+  const covers = describeCoverage(Array.isArray(keypers) ? keypers : []);
   console.log(
     kind === "teammate"
       ? `  ${name ?? "(unnamed)"} is a teammate chat`
-      : `  ${name ?? "(unnamed)"} covers keyper ${keyper ?? "(none bound)"}`,
+      : `  ${name ?? "(unnamed)"} covers ${covers ?? "nothing; run admin.ts add-keypers for it"}`,
   );
 }
 if (groups.length === 0) console.log("  none registered yet; see admin.ts add-keyper-chat");

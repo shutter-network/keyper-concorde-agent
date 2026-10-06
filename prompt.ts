@@ -9,23 +9,39 @@
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
-// A keyper chat is assigned to one keyper, and Telegram permissions allow only its operator
-// to post. A teammate chat is for teammates and has no assigned keyper.
+// A keyper chat covers a set of keypers, and Telegram permissions allow only the operators who run
+// them to post. There may be several, and each answers for every keyper the chat covers.
+// A teammate chat is for teammates and covers none.
 export type GroupKind = "keyper" | "teammate";
+
+// The keypersets being managed. `admin.ts` refuses anything else, so this is also the list the
+// agent can rely on when the team names a set.
+export const keyperSets = ["api", "gnosis"] as const;
+export type KeyperSet = (typeof keyperSets)[number];
+
+/**
+ * One machine taking part in one keyperset, the pair the metrics and logs use. A machine in two
+ * keypersets appears twice, because its uptime and running version differ per set even though it
+ * is one node.
+ */
+export type KeyperRef = { readonly instance: string; readonly set: KeyperSet };
 
 // User attributes saved by `admin.ts`. The `operators` list contains operator sender IDs.
 // Teammate chats have no operators, so their senders are labeled as teammates.
 export type GroupAttributes = {
   readonly kind: GroupKind;
   readonly name?: string;
-  readonly keyper?: string;
+  readonly keypers?: readonly KeyperRef[];
   readonly operators?: readonly string[];
 };
 
 export type PromptData = {
   readonly userId: string;
   readonly text: string;
-  readonly keyper: string | null;
+  readonly keypers: readonly KeyperRef[];
+  // The same list written for the prompt. Kept apart from `keypers` so the stored shape and the
+  // wording the model reads can change independently.
+  readonly covers: string | null;
   readonly role: string | null;
 };
 
@@ -39,12 +55,32 @@ export class UnknownGroupKindError extends Error {
 }
 
 export class UnboundGroupError extends Error {
-  constructor(userId: string) {
+  constructor(userId: string, detail = "no keypers") {
     super(
-      `User ${userId} is a keyper chat with no keyper in their Attributes, so there is nothing to answer about; run admin.ts add-keyper-chat for that chat, or set it by hand`,
+      `User ${userId} is a keyper chat with ${detail} in their Attributes, so there is nothing to answer about; run admin.ts add-keypers for that chat`,
     );
     this.name = "UnboundGroupError";
   }
+}
+
+const isKeyperSet = (value: unknown): value is KeyperSet =>
+  (keyperSets as readonly unknown[]).includes(value);
+
+/**
+ * The group's keypers, written for the model: one clause per machine, so a machine in two
+ * keypersets reads as one node rather than two. "keyper kpr-jstcz (api and gnosis keypersets)".
+ */
+export function describeCoverage(keypers: readonly KeyperRef[]): string | null {
+  if (keypers.length === 0) return null;
+  const sets = new Map<string, KeyperSet[]>();
+  for (const { instance, set } of keypers) {
+    sets.set(instance, [...(sets.get(instance) ?? []), set]);
+  }
+  const machines = [...sets].map(([instance, its]) => {
+    const named = its.length === 1 ? `${its[0]} keyperset` : `${its.join(" and ")} keypersets`;
+    return `${instance} (${named})`;
+  });
+  return `${sets.size === 1 ? "keyper" : "keypers"} ${machines.join(", ")}`;
 }
 
 // Label senders who are not registered operators as teammates. Telegram permissions control
@@ -59,14 +95,23 @@ export function roleOf(
 }
 
 // Validate the required attributes because the framework returns `unknown` and database rows
-// may have been edited manually. Ignore an extra `keyper` field on a teammate chat.
+// may have been edited manually. Ignore an extra `keypers` field on a teammate chat.
 // `admin.ts` never adds that field, but its presence should not stop a valid chat from working.
+//
+// A malformed entry fails the whole group rather than being skipped. Skipping it would quietly
+// narrow what the agent answers about, which reads as a working group that has lost a keyper.
 export function groupAttributes(userId: string, attributes: unknown): GroupAttributes {
   const shape = attributes as GroupAttributes | null;
   const kind = shape?.kind;
   if (kind !== "keyper" && kind !== "teammate") throw new UnknownGroupKindError(userId, kind);
-  if (kind === "keyper" && (typeof shape?.keyper !== "string" || shape.keyper === "")) {
-    throw new UnboundGroupError(userId);
+  if (kind === "keyper") {
+    const keypers = shape?.keypers;
+    if (!Array.isArray(keypers) || keypers.length === 0) throw new UnboundGroupError(userId);
+    for (const keyper of keypers) {
+      if (typeof keyper?.instance !== "string" || keyper.instance === "" || !isKeyperSet(keyper?.set)) {
+        throw new UnboundGroupError(userId, `the unreadable keyper ${JSON.stringify(keyper)}`);
+      }
+    }
   }
   return shape as GroupAttributes;
 }
@@ -80,10 +125,12 @@ export function promptData(
   // Convert IDs to strings in case someone stored them as numbers during a manual database edit.
   // Otherwise, the comparison would fail and the operator would be labeled as a teammate.
   const operators = Array.isArray(group.operators) ? group.operators.map(String) : [];
+  const keypers = group.kind === "keyper" ? (group.keypers ?? []) : [];
   return {
     userId: message.userId,
     text: message.text,
-    keyper: group.kind === "keyper" ? (group.keyper ?? null) : null,
+    keypers,
+    covers: describeCoverage(keypers),
     role: roleOf(sender, operators),
   };
 }

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
-import { promptData, roleOf, UnboundGroupError, UnknownGroupKindError } from "./prompt.ts";
+import {
+  describeCoverage,
+  promptData,
+  roleOf,
+  UnboundGroupError,
+  UnknownGroupKindError,
+} from "./prompt.ts";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
 const operator = "874974777";
@@ -30,8 +36,27 @@ const message: MessageRecord = {
 
 const keyperChat = {
   kind: "keyper",
-  name: "Ops kpr-jstcz",
-  keyper: "kpr-jstcz",
+  name: "Operator A",
+  keypers: [{ instance: "kpr-jstcz", set: "api" }],
+  operators: [operator],
+};
+// One machine in two keypersets. Two entries, because uptime and version differ per set.
+const dualSetChat = {
+  kind: "keyper",
+  name: "Operator A",
+  keypers: [
+    { instance: "kpr-jstcz", set: "api" },
+    { instance: "kpr-jstcz", set: "gnosis" },
+  ],
+  operators: [operator],
+};
+const severalChat = {
+  kind: "keyper",
+  name: "Operator B",
+  keypers: [
+    { instance: "kpr-one", set: "api" },
+    { instance: "kpr-two", set: "gnosis" },
+  ],
   operators: [operator],
 };
 const teammateChat = { kind: "teammate", name: "Shutter team" };
@@ -62,16 +87,23 @@ describe("telling an operator from a teammate", () => {
 });
 
 describe("assembling the prompt's values", () => {
-  it("names the keyper a keyper chat covers, and the writer's role", () => {
-    assert.deepEqual(
-      promptData(message, senderOf(operator, "alice", "Alice"), keyperChat),
-      {
-        userId: message.userId,
-        text: "how is it doing",
-        keyper: "kpr-jstcz",
-        role: "the operator",
-      },
-    );
+  it("names the keypers a keyper chat covers, and the writer's role", () => {
+    assert.deepEqual(promptData(message, senderOf(operator, "alice", "Alice"), keyperChat), {
+      userId: message.userId,
+      text: "how is it doing",
+      keypers: [{ instance: "kpr-jstcz", set: "api" }],
+      covers: "keyper kpr-jstcz (api keyperset)",
+      role: "the operator",
+    });
+  });
+
+  it("carries every pair of a group covering several keypers", () => {
+    const data = promptData(message, senderOf(operator, "alice"), severalChat);
+    assert.deepEqual(data.keypers, [
+      { instance: "kpr-one", set: "api" },
+      { instance: "kpr-two", set: "gnosis" },
+    ]);
+    assert.equal(data.covers, "keypers kpr-one (api keyperset), kpr-two (gnosis keyperset)");
   });
 
   // A teammate chat has no assigned keyper or registered operators, so its senders are teammates.
@@ -79,7 +111,8 @@ describe("assembling the prompt's values", () => {
     assert.deepEqual(promptData(message, senderOf(teammate, "bob"), teammateChat), {
       userId: message.userId,
       text: "how is it doing",
-      keyper: null,
+      keypers: [],
+      covers: null,
       role: "a teammate",
     });
   });
@@ -88,7 +121,7 @@ describe("assembling the prompt's values", () => {
     // Handlebars strict mode fails if any field used by the template is missing.
     const data = promptData(message, undefined, teammateChat);
     assert.equal(data.role, null);
-    assert.deepEqual(Object.keys(data).sort(), ["keyper", "role", "text", "userId"]);
+    assert.deepEqual(Object.keys(data).sort(), ["covers", "keypers", "role", "text", "userId"]);
   });
 
   // Do not add usernames to the prompt data. Usernames typed into the message text
@@ -122,26 +155,81 @@ describe("assembling the prompt's values", () => {
   // Reject a keyper chat with no valid keyper assignment because the agent cannot know which
   // keyper to answer about. The Handler sends the group a failure message in its post phase.
   it("refuses a keyper chat bound to no keyper", () => {
-    for (const keyper of [undefined, "", null, 42]) {
-      assert.throws(() => promptData(message, undefined, { kind: "keyper", keyper }), UnboundGroupError);
+    for (const keypers of [undefined, [], null, 42, "kpr-jstcz", {}]) {
+      assert.throws(
+        () => promptData(message, undefined, { kind: "keyper", keypers }),
+        UnboundGroupError,
+      );
+    }
+  });
+
+  // One unreadable entry fails the whole group. Skipping it would quietly narrow what the agent
+  // answers about, which looks like a working group that has lost a keyper.
+  it("refuses a keyper chat holding an entry it cannot read", () => {
+    const bad = [
+      { instance: "kpr-jstcz" },
+      { instance: "kpr-jstcz", set: "chiado" },
+      { instance: "", set: "api" },
+      { set: "api" },
+      null,
+      "kpr-jstcz:api",
+    ];
+    for (const entry of bad) {
+      assert.throws(
+        () =>
+          promptData(message, undefined, {
+            kind: "keyper",
+            keypers: [{ instance: "kpr-ok", set: "api" }, entry],
+          }),
+        UnboundGroupError,
+      );
     }
   });
 
   // Reject an invalid chat kind instead of choosing a default. A teammate chat can contact
   // every operator, so an invalid value in a manually edited row must not grant that permission.
   it("refuses a chat whose kind it cannot read", () => {
-    for (const attributes of [null, undefined, {}, "nonsense", { kind: "keyperr" }, { keyper: "kpr-jstcz" }]) {
+    const unreadable = [null, undefined, {}, "nonsense", { kind: "keyperr" }, { keypers: [] }];
+    for (const attributes of unreadable) {
       assert.throws(() => promptData(message, undefined, attributes), UnknownGroupKindError);
     }
   });
 
-  // Ignore an extra keyper field on a teammate chat. `admin.ts` never adds it, but the chat is still valid.
-  it("ignores a stray keyper on a teammate chat", () => {
+  // Ignore a stray keypers field on a teammate chat. `admin.ts` never adds it, but the chat is
+  // still valid.
+  it("ignores a stray keypers list on a teammate chat", () => {
     const data = promptData(message, senderOf(teammate, "bob"), {
       kind: "teammate",
-      keyper: "kpr-jstcz",
+      keypers: [{ instance: "kpr-jstcz", set: "api" }],
     });
-    assert.equal(data.keyper, null);
+    assert.deepEqual(data.keypers, []);
+    assert.equal(data.covers, null);
     assert.equal(data.role, "a teammate");
+  });
+});
+
+// The wording the model reads. A machine in two keypersets must read as one node, or "how is my
+// keyper?" is answered twice for one machine.
+describe("writing the keypers for the prompt", () => {
+  it("writes one machine in one keyperset", () => {
+    assert.equal(describeCoverage(keyperChat.keypers), "keyper kpr-jstcz (api keyperset)");
+  });
+
+  it("writes one machine in two keypersets as one machine", () => {
+    assert.equal(
+      describeCoverage(dualSetChat.keypers),
+      "keyper kpr-jstcz (api and gnosis keypersets)",
+    );
+  });
+
+  it("writes several machines", () => {
+    assert.equal(
+      describeCoverage(severalChat.keypers),
+      "keypers kpr-one (api keyperset), kpr-two (gnosis keyperset)",
+    );
+  });
+
+  it("writes nothing for a group that covers nothing", () => {
+    assert.equal(describeCoverage([]), null);
   });
 });
