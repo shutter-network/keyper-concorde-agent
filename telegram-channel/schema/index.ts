@@ -41,13 +41,17 @@ export const outbox = telegramChannelSchema.table("outbox", {
   failedAt: timestamp("failed_at", { withTimezone: true }),
 });
 
-// What Telegram said about the message that became one inbound Message: its sender, chat and
-// message id. Written in the Message's own transaction; a null sender is Telegram naming nobody.
+// Store Telegram sender details, chat details and message ID for each incoming Message.
+// Save them in the same transaction as the Message. A null sender means Telegram did not
+// identify the sender. Keep the chat type to show whether the User represents a group,
+// where several people can send messages, or a private chat.
 export const senders = telegramChannelSchema.table("senders", {
   messageId: uuid("message_id").primaryKey(),
   senderId: text("sender_id"),
   username: text("username"),
+  firstName: text("first_name"),
   chatId: text("chat_id").notNull(),
+  chatType: text("chat_type").notNull(),
   telegramMessageId: text("telegram_message_id").notNull(),
   recordedAt: timestamp("recorded_at", { withTimezone: true })
     .notNull()

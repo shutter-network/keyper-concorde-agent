@@ -7,7 +7,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test \"telegram-channel/**/*.test.ts\"",
+    "test": "node --test \"**/*.test.ts\"",
     "migrate": "drizzle-kit push --force",
     "start": "node main.ts"
   },

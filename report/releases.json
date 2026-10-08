@@ -1,0 +1,26 @@
+{
+  "api": {
+    "shutter-compose": {
+      "version": "v1.4.4",
+      "deployment": "shutter-api-gnosis-1002-set1.1.2",
+      "releaseUrl": "https://github.com/shutter-network/shutter-keyper-deployment/releases/tag/shutter-api-keyper%2F2026.06.02"
+    },
+    "dappnode": {
+      "version": "v1.4.4",
+      "deployment": "shutter-api-gnosis-1002-set1.1.2",
+      "releaseUrl": "https://dappnode.github.io/explorer/#/repo/0x8928c414c10d5eeaf2eea30702b3a0c03d52ff6f/0.1.11"
+    }
+  },
+  "gnosis": {
+    "shutter-compose": {
+      "version": "v1.4.0",
+      "deployment": "shutter-gnosis-1000-set1.4.1",
+      "releaseUrl": "https://github.com/shutter-network/shutter-keyper-deployment/releases#release-gnosis/2026.01.01"
+    },
+    "dappnode": {
+      "version": "v1.4.3",
+      "deployment": "shutter-gnosis-1000-set1.4.1",
+      "releaseUrl": "https://dappnode.github.io/explorer/#/repo/0x2706bdac6070445be4f6c12c295f295db6414563/0.1.9"
+    }
+  }
+}
