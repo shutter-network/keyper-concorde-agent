@@ -156,6 +156,48 @@ do not all overlap it says so and asks what to do; it never picks a time itself.
 Both are driven entirely by `AGENTS.md`. The agent uses `GET /users/` to find the rooms,
 `POST /messages/` to write, and keeps round state in a file at `/workspace/coordination.json`.
 
+## Weekly uptime report
+
+Two halves that meet in a file, and never call each other.
+
+**`report-cron` builds the report.** It reads the registered groups from the database, asks Grafana
+for the numbers, and writes `/workspace/reports/<date>T<time>Z.json`. It never touches the agent or
+the gateway, so a slow or failing report cannot hold up the Signal worker.
+
+**The Scheduler wakes the agent.** The agent reads the newest report for today and
+posts a summary to the teammate chat. It builds nothing and recalculates nothing.
+
+Only **registered** keypers are in the report. A keyper the fleet runs but nobody has registered has
+no group to message and no recorded keyperset, so it is left out rather than listed as a gap.
+
+Every registered keyper appears in the summary, healthy or not. Only the ones with a problem get a
+**draft**: a message written for that operator, numbered, which the team approves before anything is
+sent. The problems are: no metrics at all, offline, online but not syncing, running an old release,
+and running a keyperset other than the expected one. `report/releases.json` holds the expected
+release and keyperset for each set.
+
+Nothing reaches an operator without the team approving draft for them.
+
+### Triggering either half by hand
+
+Build a report now.
+
+```sh
+docker compose run --rm --no-deps --build report-cron node report/build.ts
+```
+
+It prints the file it wrote and a count: groups, keypers, drafts.
+
+To make the agent read it, write in the teammate chat, any message asking for the report will do,
+since the duty is in `AGENTS.md`:
+
+```
+/please read today's uptime report
+```
+
+That is also how to re-run the duty after a failed scheduled attempt. The agent takes the newest
+report for today, so building first and then asking runs the whole sequence.
+
 ## Tests
 
 `telegram-channel/telegram-channel.test.ts` runs the Channel against a real PostgreSQL and a
@@ -163,6 +205,10 @@ fake Bot API on localhost (`fake-bot-api.ts`): recording chats, inbound texts an
 unknown chats, outbound replies, refusals, transient failures, splitting, a reply queued while
 stopped, a 409 from a second poller, stop and start. The helpers in `test-support.ts` mirror
 the framework's own.
+
+`report/*.test.ts` covers the report without Grafana or a database: reading panel frames, deciding
+which set a deployment label belongs to, each kind of finding and its message, scope coming from the
+registrations, grouping the summary by operator, and the report file's name.
 
 Against the stack's database, without starting the gateway:
 
@@ -214,3 +260,6 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 | `AGENTS.md` | the agent's instructions, mounted read-only |
 | `settings.json`, `models.json` | pi's model configuration, mounted read-only |
 | `schema.ts`, `drizzle.config.ts` | tables the deployment applies with drizzle-kit |
+| `report/` | the weekly report: Grafana reads, findings, drafts, and the file it writes |
+| `report/releases.json` | the release each keyperset should be running |
+| `report/crontab` | when `report-cron` builds the report |
