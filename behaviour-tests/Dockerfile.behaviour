@@ -1,0 +1,13 @@
+FROM node:24-alpine
+RUN apk add --no-cache docker-cli
+WORKDIR /app
+
+COPY --from=application package.json ./
+COPY --from=application vendor ./vendor
+RUN npm install --no-audit --no-fund
+
+COPY --from=application schema.ts ./
+COPY --from=application telegram-channel ./telegram-channel
+COPY *.mts ./behaviour-tests/
+
+CMD ["node", "--test", "behaviour-tests/scenarios.test.mts"]

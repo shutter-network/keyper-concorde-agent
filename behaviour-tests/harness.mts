@@ -1,0 +1,301 @@
+// Runs inside Docker Compose. Agent mounts use paths on the Docker host.
+
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+import { createGateway } from "@shutter-network/concorde/gateway";
+import { createMessenger, messageReceivedKind, type MessageRecord } from "@shutter-network/concorde/messenger";
+import { createPasswordAuth } from "@shutter-network/concorde/password-auth";
+import { createPiRuntime } from "@shutter-network/concorde/pi";
+import { templateHandler, type PostOutcome, type Runtime, type Signal } from "@shutter-network/concorde/signals";
+import { signals } from "@shutter-network/concorde/signals/schema";
+import { createUsers } from "@shutter-network/concorde/users";
+import * as schema from "../schema.ts";
+import { startFakeBotApi } from "../telegram-channel/fake-bot-api.ts";
+import { createTelegramChannel } from "../telegram-channel/index.ts";
+import { applySchema, createTestDatabase } from "../telegram-channel/test-support.ts";
+
+const execute = promisify(execFile);
+
+export type Room = "team" | "a" | "b";
+export const rooms: readonly Room[] = ["team", "a", "b"];
+const chatIds: Readonly<Record<Room, number>> = { team: -100800001, a: -100800002, b: -100800003 };
+const senderIds: Readonly<Record<Room, number>> = { team: 900001, a: 900002, b: 900003 };
+
+export const runId = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+export const transcriptPath = join("/results", runId, "transcript.txt");
+
+export type Sent = { readonly to: Room; readonly text: string };
+
+export type AgentRun = {
+  readonly from: Room;
+  readonly text: string;
+  readonly sent: readonly Sent[];
+  /** Parsed coordination.json, or undefined if the file does not exist. */
+  readonly file: unknown;
+  /** Messages from this run to one room, joined with newlines. */
+  to(room: Room): string;
+};
+
+export type Harness = {
+  readonly ids: Readonly<Record<Room, string>>;
+  /** Send a message and wait for the agent to finish. */
+  send(room: Room, text: string): Promise<AgentRun>;
+  /** Restart the gateway. Workspace and sessions are kept. */
+  restart(): Promise<void>;
+  /** All messages sent to a room during this scenario. */
+  messagesTo(room: Room): string;
+  /** Save the results and close the scenario. Call once. */
+  finish(failure?: unknown): Promise<void>;
+};
+
+type Settings = { defaultProvider?: string; defaultModel?: string; defaultThinkingLevel?: string };
+type SignalRow = { state: string; error: string | null };
+type Logger = Record<"debug" | "info" | "warn" | "error", (...args: unknown[]) => void>;
+
+// Keep this template in sync with main.ts.
+const template = `A message arrived for you from user {{userId}}. They said:
+
+{{text}}
+
+Answer them by sending them a Message. Your final reply here reaches nobody.`;
+
+const failureMessage = "I could not process your last message. Please try again in a few minutes.";
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  assert.ok(value, `Missing environment variable ${name}. Use ./run.sh.`);
+  return value;
+}
+
+function fileLogger(path: string): Logger {
+  const record = (level: string) => (...args: unknown[]) => {
+    appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), level, args })}\n`);
+  };
+  return { debug: record("debug"), info: record("info"), warn: record("warn"), error: record("error") };
+}
+
+async function writeTranscriptHeader(model: string): Promise<void> {
+  try {
+    await writeFile(transcriptPath, `run ${runId}\nmodel ${model}\n\n`, { flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+
+// The transcript truncates messages; report.json keeps the full text.
+const textWidth = 84;
+
+function oneLine(text: string): string {
+  const flat = text.replaceAll(/\s+/g, " ").trim();
+  return flat.length <= textWidth ? flat : `${flat.slice(0, textWidth - 1)}…`;
+}
+
+function fileSummary(file: unknown, ids: Readonly<Record<Room, string>>): string {
+  if (file === undefined) return "none";
+  const text = JSON.stringify(file);
+  const named = rooms.filter((room) => room !== "team" && text.includes(ids[room]));
+  return named.length === 0 ? "empty" : `round with ${named.join(", ")}`;
+}
+
+function transcriptBlock(scenario: string, runs: readonly AgentRun[], ids: Readonly<Record<Room, string>>, failure?: string): string {
+  const arrow = (from: string, to: string) => `${from.padEnd(4)} -> ${to.padEnd(4)}  `;
+  const lines = [`${scenario}  ${failure === undefined ? "PASS" : "FAIL"}  ${runs.length} runs`, ""];
+  let previousFile = "";
+  for (const run of runs) {
+    lines.push(`${arrow(run.from, "bot")}${oneLine(run.text)}`);
+    for (const message of run.sent) lines.push(`${arrow("bot", message.to)}${oneLine(message.text)}`);
+    const file = fileSummary(run.file, ids);
+    if (file !== previousFile) lines.push(`${" ".repeat(14)}file: ${file}`);
+    previousFile = file;
+    lines.push("");
+  }
+  if (failure !== undefined) lines.push(`FAIL  ${failure}`, "");
+  return `${lines.join("\n")}\n`;
+}
+
+export async function startHarness(scenario: string): Promise<Harness> {
+  const suiteHost = requiredEnv("KEYPER_TESTS_DIR");
+  const repoHost = dirname(suiteHost);
+  const timeoutMs = Number(process.env.TURN_TIMEOUT_SECONDS ?? "600") * 1000;
+  const directory = join("/results", runId, scenario);
+  const hostDirectory = join(suiteHost, "results", runId, scenario);
+  await mkdir(join(directory, "workspace"), { recursive: true });
+  await mkdir(join(directory, "agent"), { recursive: true });
+  const log = fileLogger(join(directory, "gateway.log"));
+
+  const settings = JSON.parse(await readFile("/config/settings.json", "utf8")) as Settings;
+  const model = `${settings.defaultProvider}/${settings.defaultModel}, thinking ${settings.defaultThinkingLevel ?? "default"}`;
+  await writeTranscriptHeader(model);
+
+  const database = await createTestDatabase(`behaviour_${randomUUID().replaceAll("-", "")}`);
+  await applySchema(database.db, schema);
+  const api = await startFakeBotApi();
+
+  // Track the container so it can be removed on timeout.
+  const image = requiredEnv("AGENT_IMAGE");
+  const providerEnv = Object.fromEntries(
+    ["ANTHROPIC_API_KEY", "LOCAL_API_KEY"].filter((key) => process.env[key]).map((key) => [key, process.env[key]!]),
+  );
+  let container: string | undefined;
+  let containers = 0;
+  const hostPath = (...parts: string[]) => join(...parts).slice(1); // relative to runtimeDir "/"
+  const runtime: Runtime = {
+    async run(prompt) {
+      const name = `keyper-behaviour-${runId}-${scenario}-${++containers}`;
+      container = name;
+      const pi = createPiRuntime({
+        image,
+        env: { ...providerEnv, AGENT_SERVER_URL: "http://runner:7411" },
+        networks: ["keyper_behaviour_agent"],
+        extraArgs: ["--name", name],
+        mounts: {
+          runtimeDir: "/",
+          entries: [
+            { agentPath: "/workspace", path: hostPath(hostDirectory, "workspace") },
+            { agentPath: "/home/agent/.pi/agent", path: hostPath(hostDirectory, "agent") },
+            { agentPath: "/workspace/AGENTS.md", path: hostPath(hostDirectory, "AGENTS.md"), readOnly: true },
+            { agentPath: "/home/agent/.pi/agent/settings.json", path: hostPath(repoHost, "settings.json"), readOnly: true },
+            { agentPath: "/home/agent/.pi/agent/models.json", path: hostPath(repoHost, "models.json"), readOnly: true },
+          ],
+        },
+      });
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        void execute("docker", ["rm", "-f", name]).catch(() => undefined);
+      }, timeoutMs);
+      try {
+        const outcome = await pi.run(prompt);
+        return timedOut ? { ok: false, error: `Agent run exceeded ${timeoutMs / 1000}s` } : outcome;
+      } finally {
+        clearTimeout(timer);
+        container = undefined;
+      }
+    },
+  };
+
+  const buildGateway = () =>
+    createGateway({
+      databaseUrl: database.url,
+      runtime,
+      logger: log,
+      publicListen: { host: "127.0.0.1", port: 0 },
+      agentListen: { host: "0.0.0.0", port: 7411 },
+      extend: ({ db, agentServer, publicServer, worker }) => {
+        const users = createUsers({ db, agentServer, publicServer });
+        const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl: 30 * 24 * 60 * 60 * 1000 });
+        const messenger = createMessenger({ db, users, worker, agentServer });
+        const telegram = createTelegramChannel({
+          db, messenger, token: "000000:TEST", apiBaseUrl: api.url, pollTimeoutSeconds: 1, retryDelayMs: 100, logger: log,
+        });
+        return { users, passwordAuth, messenger, telegram };
+      },
+      handlers: ({ db, messenger }) => ({
+        [messageReceivedKind]: {
+          ...templateHandler<MessageRecord>({
+            template,
+            session: (signal) => `user_${signal.payload.userId}`,
+            data: (signal) => signal.payload,
+          }),
+          async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
+            if (outcome.failed) await db.tx((tx) => messenger.send(tx, signal.payload.userId, failureMessage));
+          },
+        },
+      }),
+    });
+  let gateway = buildGateway();
+
+  // Each scenario has its own users and team ID.
+  const ids = {} as Record<Room, string>;
+  for (const room of rooms) {
+    ids[room] = await gateway.components.db.tx(async (tx) => {
+      const user = await gateway.components.users.create(tx);
+      await gateway.components.users.setAttributes(tx, user.id, { name: room === "team" ? "Test team" : `Operator ${room.toUpperCase()}` });
+      await gateway.components.telegram.recordChat(tx, user.id, String(chatIds[room]));
+      return user.id;
+    });
+  }
+  const instructions = await readFile("/config/AGENTS.md", "utf8");
+  assert.match(instructions, /^Team user: .+$/m, "AGENTS.md is missing a 'Team user:' line");
+  await writeFile(join(directory, "AGENTS.md"), instructions.replace(/^Team user: .+$/m, `Team user: ${ids.team}`));
+  await gateway.start();
+
+  const signalRows = (): Promise<SignalRow[]> => gateway.components.db.handle({}).select().from(signals);
+  async function readRoundFile(): Promise<unknown> {
+    try {
+      return JSON.parse(await readFile(join(directory, "workspace/coordination.json"), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  let updateCount = 0;
+  const runs: AgentRun[] = [];
+  const roomForChat = (chatId: string): Room => {
+    const room = rooms.find((candidate) => String(chatIds[candidate]) === chatId);
+    assert.ok(room, `Message sent to unknown chat ${chatId}`);
+    return room;
+  };
+
+  return {
+    ids,
+    async send(room, text) {
+      const sentBefore = api.sent.length;
+      const id = ++updateCount;
+      api.push({
+        update_id: id,
+        message: {
+          message_id: id,
+          text: `/reply ${text}`,
+          chat: { id: chatIds[room], type: "supergroup" },
+          from: { id: senderIds[room], username: `test_${room}` },
+        },
+      });
+      // Wait for the signal to finish before reading messages and state.
+      const deadline = Date.now() + timeoutMs + 30_000;
+      let rows: SignalRow[];
+      for (;;) {
+        rows = await signalRows();
+        if (rows.length === id && rows.every((row) => row.state === "done" || row.state === "failed")) break;
+        assert.ok(Date.now() < deadline, `Agent run timed out for ${room}: ${JSON.stringify(text)}`);
+        await new Promise((resume) => setTimeout(resume, 100));
+      }
+      await gateway.components.telegram.drain();
+      const sent = api.sent.slice(sentBefore).map((message) => ({ to: roomForChat(message.chatId), text: message.text }));
+      const run: AgentRun = {
+        from: room,
+        text,
+        sent,
+        file: await readRoundFile(),
+        to: (target) => sent.filter((message) => message.to === target).map((message) => message.text).join("\n"),
+      };
+      runs.push(run);
+      const failed = rows.find((row) => row.state === "failed");
+      assert.ok(failed === undefined, `Agent run failed for ${room}: ${failed?.error}; input: ${JSON.stringify(text)}`);
+      return run;
+    },
+    async restart() {
+      await gateway.stop();
+      gateway = buildGateway();
+      await gateway.start();
+    },
+    messagesTo(room) {
+      return runs.flatMap((run) => run.sent.filter((message) => message.to === room).map((message) => message.text)).join("\n");
+    },
+    async finish(failure) {
+      const error = failure === undefined ? undefined : failure instanceof Error ? failure.message : String(failure);
+      await appendFile(transcriptPath, transcriptBlock(scenario, runs, ids, error));
+      await writeFile(join(directory, "report.json"), `${JSON.stringify({ scenario, passed: error === undefined, error, model, ids, runs }, null, 2)}\n`);
+      if (container !== undefined) await execute("docker", ["rm", "-f", container]).catch(() => undefined);
+      await gateway.stop();
+      await api.stop();
+      await database.drop();
+    },
+  };
+}
