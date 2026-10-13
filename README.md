@@ -230,7 +230,7 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 - A run that fails tells the sender "I could not process your last message" through the
   handler's `post` phase, and nothing more. The reason is in `docker compose logs gateway`, as
   the error on the `Run finished` line, and in the agent container's own log while it runs:
-  `docker logs $(docker ps -q --filter ancestor=keyper-concorde-agent:0.83.0)`.
+  `docker logs $(docker ps -q --filter ancestor=keyper-concorde-agent:1.2.0)`.
 - If the model endpoint is down, every message looks like the agent is offline. Test the
   endpoint directly with a one-word chat completion before debugging anything here, with
   `BASE_URL`, `API_KEY` and `MODEL` set to the values from `models.json` and `settings.json`:

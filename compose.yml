@@ -19,7 +19,7 @@ services:
       AGENT_HOST: 0.0.0.0
       AGENT_PORT: "7411"
       AGENT_SERVER_URL: http://gateway:7411
-      AGENT_IMAGE: keyper-concorde-agent:0.83.0
+      AGENT_IMAGE: keyper-concorde-agent:1.2.0
       AGENT_NETWORK: keyper_agent_agent
       RUNTIME_DIR_HOST: ${PWD}
     volumes:
@@ -96,7 +96,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.agent
-    image: keyper-concorde-agent:0.83.0
+    image: keyper-concorde-agent:1.2.0
     command: ["--version"]
     restart: "no"
     networks: [agent]
