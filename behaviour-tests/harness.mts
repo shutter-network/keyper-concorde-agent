@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { createGateway } from "@shutter-network/concorde/gateway";
@@ -81,7 +81,7 @@ function fileLogger(path: string): Logger {
 
 async function writeTranscriptHeader(model: string): Promise<void> {
   try {
-    await writeFile(transcriptPath, `run ${runId}\nmodel ${model}\n\n`, { flag: "wx" });
+    await writeFile(transcriptPath, `run ${runId}\n\n`, { flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
@@ -102,9 +102,31 @@ function fileSummary(file: unknown, ids: Readonly<Record<Room, string>>): string
   return named.length === 0 ? "empty" : `round with ${named.join(", ")}`;
 }
 
-function transcriptBlock(scenario: string, runs: readonly AgentRun[], ids: Readonly<Record<Room, string>>, failure?: string): string {
+// provider/model as the session files record it. The settings file is what was asked for;
+// pi falls back to another model without warning when the asked one is not in its catalog.
+async function modelThatRan(sessionsDir: string): Promise<string | undefined> {
+  const files: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.name.endsWith(".jsonl")) files.push(path);
+    }
+  }
+  await walk(sessionsDir);
+  for (const file of files) {
+    const text = await readFile(file, "utf8");
+    const match = /"provider":"([^"]+)","model":"([^"]+)"/.exec(text);
+    if (!match) continue;
+    const level = /"thinkingLevel":"([^"]+)"/.exec(text);
+    return `${match[1]}/${match[2]}${level ? `, thinking ${level[1]}` : ""}`;
+  }
+  return undefined;
+}
+
+function transcriptBlock(scenario: string, runs: readonly AgentRun[], ids: Readonly<Record<Room, string>>, ran: string | undefined, failure?: string): string {
   const arrow = (from: string, to: string) => `${from.padEnd(4)} -> ${to.padEnd(4)}  `;
-  const lines = [`${scenario}  ${failure === undefined ? "PASS" : "FAIL"}  ${runs.length} runs`, ""];
+  const lines = [`${scenario}  ${failure === undefined ? "PASS" : "FAIL"}  ${runs.length} runs, ran ${ran ?? "no model"}`, ""];
   let previousFile = "";
   for (const run of runs) {
     lines.push(`${arrow(run.from, "bot")}${oneLine(run.text)}`);
@@ -237,6 +259,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
 
   let updateCount = 0;
   const runs: AgentRun[] = [];
+  let ranModel: string | undefined;
   const roomForChat = (chatId: string): Room => {
     const room = rooms.find((candidate) => String(chatIds[candidate]) === chatId);
     assert.ok(room, `Message sent to unknown chat ${chatId}`);
@@ -276,6 +299,12 @@ export async function startHarness(scenario: string): Promise<Harness> {
         to: (target) => sent.filter((message) => message.to === target).map((message) => message.text).join("\n"),
       };
       runs.push(run);
+      const ran = await modelThatRan(join(directory, "agent/sessions"));
+      if (ran !== undefined) {
+        ranModel ??= ran;
+        const expected = `${settings.defaultProvider}/${settings.defaultModel}`;
+        assert.ok(ran.startsWith(`${expected},`) || ran === expected, `settings.json names ${expected} but the Run used ${ran}`);
+      }
       const failed = rows.find((row) => row.state === "failed");
       assert.ok(failed === undefined, `Agent run failed for ${room}: ${failed?.error}; input: ${JSON.stringify(text)}`);
       return run;
@@ -290,8 +319,8 @@ export async function startHarness(scenario: string): Promise<Harness> {
     },
     async finish(failure) {
       const error = failure === undefined ? undefined : failure instanceof Error ? failure.message : String(failure);
-      await appendFile(transcriptPath, transcriptBlock(scenario, runs, ids, error));
-      await writeFile(join(directory, "report.json"), `${JSON.stringify({ scenario, passed: error === undefined, error, model, ids, runs }, null, 2)}\n`);
+      await appendFile(transcriptPath, transcriptBlock(scenario, runs, ids, ranModel, error));
+      await writeFile(join(directory, "report.json"), `${JSON.stringify({ scenario, passed: error === undefined, error, requested: model, ran: ranModel, ids, runs }, null, 2)}\n`);
       if (container !== undefined) await execute("docker", ["rm", "-f", container]).catch(() => undefined);
       await gateway.stop();
       await api.stop();

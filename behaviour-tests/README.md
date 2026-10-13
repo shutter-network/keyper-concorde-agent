@@ -14,13 +14,9 @@ Requires Docker Compose 2.17 or newer.
 
 ## Run
 
-From this directory, export the API key required by `settings.json`:
-
-```sh
-export ANTHROPIC_API_KEY=...
-```
-
-Use `LOCAL_API_KEY` instead if your model configuration requires it.
+From this directory. `run.sh` passes the repository's `.env` to compose, so the provider key
+in it (`ANTHROPIC_API_KEY` or `LOCAL_API_KEY`, as `settings.json` requires) reaches the agent.
+A variable exported in the shell takes precedence over the file.
 
 Run one scenario:
 
