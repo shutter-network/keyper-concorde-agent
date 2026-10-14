@@ -1,22 +1,22 @@
 # Keyper behaviour tests
 
-Tests for DKG scheduling with the real gateway and model, using a fake Telegram API.
-Each input message starts one agent run.
+DKG scheduling tests using Concorde, the configured model and a simulated Telegram API.
+Each input message starts one agent run. Tests do not contact real Telegram groups, but
+they make model API calls and incur costs.
 
 ## Setup
 
-Place this folder inside the application repository. Its parent directory must contain
-`package.json`, `vendor/`, `telegram-channel/`, `schema.ts`, `Dockerfile.agent`,
-`AGENTS.md`, `settings.json` and `models.json`. Use the deployment's Concorde package
-and model configuration.
+Use this directory in the application checkout. The runner builds from the repository's
+source files and Concorde tarball in `vendor/`. Agent containers mount the repository's
+`AGENTS.md`, `SYSTEM.md`, `settings.json` and `models.json`.
 
 Requires Docker Compose 2.17 or newer.
 
 ## Run
 
-From this directory. `run.sh` passes the repository's `.env` to compose, so the provider key
-in it (`ANTHROPIC_API_KEY` or `LOCAL_API_KEY`, as `settings.json` requires) reaches the agent.
-A variable exported in the shell takes precedence over the file.
+Run from this directory. `run.sh` loads the repository's `.env` through Docker Compose.
+It forwards `ANTHROPIC_API_KEY` and `LOCAL_API_KEY` when set. Exported shell variables
+override values in `.env`.
 
 Run one scenario:
 
@@ -56,16 +56,21 @@ docker compose -f compose.behaviour.yml down
 
 - `assertRecipients`: required recipients get a message; other recipients are limited to the optional list.
 - `assertDateAndTime`: messages contain the expected date and time. Accepts ISO dates, English month names, DD.MM dates, and 24-hour or AM/PM times.
-- `assertQuestionAbout`: a message contains a question mark and matches the topic pattern.
 - `assertRoundHasParticipants`: `coordination.json` contains both participant IDs.
 - `assertRoundRemoved` and `assertNoRound`: the file is absent or contains neither participant ID.
 - `assertNeverSentTo`: messages to a recipient do not contain the specified private text.
 
-A failed agent run fails the scenario. The round file is parsed as JSON, with no required schema.
-A pass means these assertions passed. Review the full replies in `report.json` to assess their meaning.
+A failed agent run fails the scenario. State checks parse `coordination.json` but only check
+for participant IDs; they do not validate recorded availability or pending questions.
+Message checks inspect recipients and date/time text, not whether a reply is a question,
+proposal or confirmation. Confidentiality checks detect specific text, not paraphrased disclosures.
+Review `report.json` before treating a pass as evidence that the conversation was correct.
 
-`harness.mts` starts the gateway, sends messages through fake Telegram, waits for each agent
-run to finish, and records replies and saved state. Its message template must match `main.ts`.
+Concurrent rounds, unrelated status questions during a round, and cost measurements are not
+automated here. The silent-operator test checks one run, not an extended waiting period.
+
+`harness.mts` creates a test Gateway, injects Telegram messages, waits for each run to finish,
+and records replies and state. It duplicates the handler setup from `main.ts`; keep both in sync.
 It copies `AGENTS.md` unchanged.
 
 ## Results

@@ -23,9 +23,8 @@ import { createTelegramChannel } from "./telegram-channel/index.ts";
 
 const tokenTtl = 30 * 24 * 60 * 60 * 1000;
 
-// Only what is named here reaches the agent container. Whichever provider keys are set in the
-// environment are forwarded, so switching provider is a change to .env and the two pi files,
-// not a rebuild.
+// Forward only configured provider keys. Provider changes use .env and Pi configuration;
+// they do not require rebuilding the image.
 const providerKeys = ["ANTHROPIC_API_KEY", "LOCAL_API_KEY"];
 const providerEnv = Object.fromEntries(
   providerKeys.filter((name) => process.env[name]).map((name) => [name, process.env[name]!]),
@@ -61,7 +60,7 @@ const gateway = createGateway({
     const users = createUsers({ db, agentServer, publicServer });
     const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
     const messenger = createMessenger({ db, users, worker, agentServer });
-    // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
+    // Telegram replaces the HTTP Channel; public HTTP message routes are not registered.
     // Accept group chats only. Reject private chats before storing a Message because they
     // have no assigned keyper.
     const telegram = createTelegramChannel({
@@ -162,8 +161,7 @@ await gateway.components.scheduler.schedule({
 // the chat link and any keyper assignment together. This avoids creating Users that cannot
 // receive messages or keyper groups with no assigned keyper.
 //
-// Name a keyper group that covers nothing. Such a group raises UnboundGroupError on every message
-// it sends, so saying so at boot turns a silent runtime failure into one line in the log.
+// Log groups with no assigned Keypers at startup. Their messages fail with UnboundGroupError.
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {

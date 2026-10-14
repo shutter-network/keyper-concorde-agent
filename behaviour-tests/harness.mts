@@ -20,7 +20,7 @@ import { createTelegramChannel } from "../telegram-channel/index.ts";
 import { applySchema, createTestDatabase } from "../telegram-channel/test-support.ts";
 import { promptData } from "../prompt.ts";
 
-/** Keyper instances of the two operator rooms, api set. */
+/** Test Keyper instances, both in the API set. */
 export const instances: Readonly<Record<"a" | "b", string>> = { a: "kpr-one", b: "kpr-two" };
 
 const execute = promisify(execFile);
@@ -61,7 +61,7 @@ type Settings = { defaultProvider?: string; defaultModel?: string; defaultThinki
 type SignalRow = { state: string; error: string | null };
 type Logger = Record<"debug" | "info" | "warn" | "error", (...args: unknown[]) => void>;
 
-// Template from main.ts. Keep identical.
+// Copied from main.ts; keep the templates identical.
 const template = `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
 
 {{text}}
@@ -106,8 +106,8 @@ function fileSummary(file: unknown, ids: Readonly<Record<Room, string>>): string
   return named.length === 0 ? "empty" : `round with ${named.join(", ")}`;
 }
 
-// provider/model as the session files record it. The settings file is what was asked for;
-// pi falls back to another model without warning when the asked one is not in its catalog.
+// Read the first recorded provider/model and thinking level from the session files.
+// Compare them with settings.json to detect a model fallback or thinking-level change.
 async function modelThatRan(sessionsDir: string): Promise<string | undefined> {
   const files: string[] = [];
   async function walk(dir: string): Promise<void> {
@@ -313,8 +313,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
       const ran = await modelThatRan(join(directory, "agent/sessions"));
       if (ran !== undefined) {
         ranModel ??= ran;
-        // pi clamps a thinking level the model entry does not list (xhigh and max need a
-        // thinkingLevelMap entry) and substitutes a model it does not know, both silently.
+        // Check the recorded model and thinking level against the requested configuration.
         const expected = `${settings.defaultProvider}/${settings.defaultModel}`
           + (settings.defaultThinkingLevel ? `, thinking ${settings.defaultThinkingLevel}` : "");
         const matches = settings.defaultThinkingLevel ? ran === expected : ran.split(",")[0] === expected;
