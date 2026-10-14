@@ -46,6 +46,8 @@ const runtime = createPiRuntime({
       { agentPath: "/workspace/AGENTS.md", path: "AGENTS.md", readOnly: true },
       { agentPath: "/home/agent/.pi/agent/settings.json", path: "settings.json", readOnly: true },
       { agentPath: "/home/agent/.pi/agent/models.json", path: "models.json", readOnly: true },
+      // Replaces pi's built-in system prompt. AGENTS.md is appended after it.
+      { agentPath: "/home/agent/.pi/agent/SYSTEM.md", path: "SYSTEM.md", readOnly: true },
     ],
   },
 });

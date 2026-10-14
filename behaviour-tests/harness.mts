@@ -183,6 +183,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
             { agentPath: "/workspace/AGENTS.md", path: hostPath(hostDirectory, "AGENTS.md"), readOnly: true },
             { agentPath: "/home/agent/.pi/agent/settings.json", path: hostPath(repoHost, "settings.json"), readOnly: true },
             { agentPath: "/home/agent/.pi/agent/models.json", path: hostPath(repoHost, "models.json"), readOnly: true },
+            { agentPath: "/home/agent/.pi/agent/SYSTEM.md", path: hostPath(repoHost, "SYSTEM.md"), readOnly: true },
           ],
         },
       });
@@ -302,8 +303,12 @@ export async function startHarness(scenario: string): Promise<Harness> {
       const ran = await modelThatRan(join(directory, "agent/sessions"));
       if (ran !== undefined) {
         ranModel ??= ran;
-        const expected = `${settings.defaultProvider}/${settings.defaultModel}`;
-        assert.ok(ran.startsWith(`${expected},`) || ran === expected, `settings.json names ${expected} but the Run used ${ran}`);
+        // pi clamps a thinking level the model entry does not list (xhigh and max need a
+        // thinkingLevelMap entry) and substitutes a model it does not know, both silently.
+        const expected = `${settings.defaultProvider}/${settings.defaultModel}`
+          + (settings.defaultThinkingLevel ? `, thinking ${settings.defaultThinkingLevel}` : "");
+        const matches = settings.defaultThinkingLevel ? ran === expected : ran.split(",")[0] === expected;
+        assert.ok(matches, `settings.json asks for ${expected} but the Run used ${ran}`);
       }
       const failed = rows.find((row) => row.state === "failed");
       assert.ok(failed === undefined, `Agent run failed for ${room}: ${failed?.error}; input: ${JSON.stringify(text)}`);
