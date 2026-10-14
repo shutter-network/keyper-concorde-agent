@@ -12,10 +12,6 @@ and model configuration.
 
 Requires Docker Compose 2.17 or newer.
 
-Runs on main and on feat/keyper-groups. With `prompt.ts` present, the harness uses the groups
-branch's wiring and attributes, and the opening request names the keypers `kpr-one` and
-`kpr-two`.
-
 ## Run
 
 From this directory. `run.sh` passes the repository's `.env` to compose, so the provider key
@@ -70,7 +66,7 @@ A pass means these assertions passed. Review the full replies in `report.json` t
 
 `harness.mts` starts the gateway, sends messages through fake Telegram, waits for each agent
 run to finish, and records replies and saved state. Its message template must match `main.ts`.
-It copies `AGENTS.md` and sets the `Team user:` line to the scenario's team ID.
+It copies `AGENTS.md` unchanged.
 
 ## Results
 

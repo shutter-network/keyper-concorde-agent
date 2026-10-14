@@ -28,7 +28,7 @@ testScenario("missing-details", async (harness) => {
   assertRecipients(run, ["team"]);
   assertNoRound(harness, run);
 
-  run = await harness.send("team", `One hour, ${monday} at ${time} UTC, ${monday} through ${wednesday}, 14:00 to 17:00 UTC. ${harness.groups ? `Ask ${instances.a} and ${instances.b}.` : "Ask both keypers."}`);
+  run = await harness.send("team", `One hour, ${monday} at ${time} UTC, ${monday} through ${wednesday}, 14:00 to 17:00 UTC. Ask ${instances.a} and ${instances.b}.`);
   assertRecipients(run, ["a", "b", "team"]);
   assertDateAndTime(run, "a", monday, time);
   assertDateAndTime(run, "b", monday, time);
@@ -43,7 +43,7 @@ testScenario("ambiguous-reply", async (harness) => {
 });
 
 testScenario("misspelled-date", async (harness) => {
-  const run = await harness.send("team", `Arrange a one-hour DKG on ${dateWithTypo(wednesday)} at ${time} UTC. That day only, between 14:00 and 17:00 UTC. ${harness.groups ? `Ask ${instances.a} and ${instances.b}` : "Ask both keypers"} and propose the time for my confirmation.`);
+  const run = await harness.send("team", `Arrange a one-hour DKG on ${dateWithTypo(wednesday)} at ${time} UTC. That day only, between 14:00 and 17:00 UTC. Ask ${instances.a} and ${instances.b} and propose the time for my confirmation.`);
   if (run.to("a") === "" && run.to("b") === "") {
     assertRecipients(run, ["team"]);
   } else {
@@ -129,7 +129,7 @@ after(async () => {
 async function openRound(harness: Harness): Promise<AgentRun> {
   const run = await harness.send(
     "team",
-    `Find a time for a one-hour DKG. Preferred: ${monday} at ${time} UTC. Acceptable dates: ${monday} through ${wednesday}, between 14:00 and 17:00 UTC. ${harness.groups ? `Ask ${instances.a} and ${instances.b}` : "Ask both keypers"} and propose a time for my confirmation.`,
+    `Find a time for a one-hour DKG. Preferred: ${monday} at ${time} UTC. Acceptable dates: ${monday} through ${wednesday}, between 14:00 and 17:00 UTC. Ask ${instances.a} and ${instances.b} and propose a time for my confirmation.`,
   );
   assertRecipients(run, ["a", "b", "team"]);
   assertDateAndTime(run, "a", monday, time);

@@ -6,9 +6,7 @@ COPY --from=application package.json ./
 COPY --from=application vendor ./vendor
 RUN npm install --no-audit --no-fund
 
-COPY --from=application schema.ts ./
-# prompt.ts exists on the keyper-groups branch only.
-RUN --mount=type=bind,from=application,target=/src sh -c 'cp /src/prompt.ts ./ 2>/dev/null || true'
+COPY --from=application schema.ts prompt.ts ./
 COPY --from=application telegram-channel ./telegram-channel
 COPY *.mts ./behaviour-tests/
 
