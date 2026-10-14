@@ -38,6 +38,32 @@ services:
         condition: service_completed_successfully
     stop_grace_period: 300s
 
+  # Builds the weekly report and writes it to the shared workspace. It never touches the agent or
+  # the gateway.
+  #
+  # To build a report now, override the command on this same service:
+  #
+  #   docker compose run --rm --no-deps --build report-cron node report/build.ts
+  report-cron:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["crond", "-f", "-l", "8"]
+    environment:
+      DATABASE_URL: *database-url
+      REPORT_DIR: /app/state/workspace/reports
+      NODE_OPTIONS: --dns-result-order=ipv4first
+    volumes:
+      - ./report/crontab:/etc/crontabs/root:ro
+      - ./state/workspace:/app/state/workspace
+    networks: [db]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   migrate:
     build:
       context: .

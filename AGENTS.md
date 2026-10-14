@@ -219,6 +219,52 @@ Send brief messages. Do not narrate your plan.
 Never sleep or poll while waiting for people.
 Before ending any Run about a round, confirm to yourself: the availability or question is written in the file, the message to the person was sent, and completeness was checked.
 
+## Weekly uptime report
+
+A separate job builds a report and writes it to `/workspace/reports/`. You do not build the report,
+query Grafana for it, recalculate any of its numbers, or rewrite any of its messages.
+
+The report covers the Keypers registered in their groups, and no others. Every registered Keyper is
+in the summary whether or not anything is wrong with it; only the ones with a problem have a draft.
+
+Report files are named by the date and time they were built, such as `2026-10-02T20-27-16Z.json`,
+so their names sort oldest to newest. List `/workspace/reports/` and take the **newest file whose
+name starts with today's date**. Today's date is in the message that woke you. More than one report
+can exist for one day, and only the newest is current. Do not read a file from an earlier day: if
+there is none for today, that is case 1 below. Each report has its own sent log beside it, with
+`.sent.jsonl` in place of `.json`. Use the log belonging to the report you are reading, and never
+one from a different report.
+
+1. If no file exists for today, tell the team the report did not run, and send nothing else.
+2. If `status` is `"failed"`, tell the team what `errors` says. Send no operator messages.
+3. Read this report's sent log if it exists. Every `n` in it has already been sent. Never send one
+   of those again.
+4. Send the team **one** message containing the summary, then **every draft in the file**. The
+   summary is grouped by operator: each entry names the group and the Keypers it covers, with a row
+   for each keyperset. Give each draft its number and name the group it would go to. Mark a draft
+   that is already in the sent log as already sent, with the group it went to, so the team sees the
+   whole report rather than wondering where the missing numbers went. Then ask only about the ones
+   not yet sent. Send this once. Do not follow it with a second message saying the same thing in
+   different words. If `errors` is not empty, say the report is partial and which part is missing.
+5. Ask which drafts may be sent. End the Run. Send no operator messages in this Run.
+6. When the team answers, send only the drafts they named, using the `text` from the file exactly as
+   it is written. Do not reword a draft, shorten it, or merge two drafts into one message. If you
+   cannot tell which drafts they meant, ask once and end the Run.
+7. After each successful `POST /messages/`, append one line to this report's own sent log straight
+   away. The log is the report's file name with `.sent.jsonl` in place of `.json`, so a report named
+   `2026-10-02T20-27-16Z.json` is logged in `2026-10-02T20-27-16Z.sent.jsonl`. One line per send:
+   `{"n":1,"userId":"...","messageId":"...","sentAt":"..."}`. Append it after each send, not once at
+   the end, so a Run that stops early still records what it sent.
+8. **Always finish by telling the team what happened, in every Run where you sent anything.** This
+   is required, not optional, and it is a separate `POST /messages/` to the team. Say which draft
+   numbers were sent and to which groups, which failed, and which you are unsure about because the
+   call did not clearly succeed or fail. Say it even when every draft succeeded, and even when you
+   sent only one. A team that is told nothing cannot tell a successful send from a Run that stopped
+   half way.
+
+The team's approval covers only the drafts they named in the report in front of you. It never
+carries to a later report, and it never covers a draft they did not name.
+
 ## Keyper status and uptime
 
 You help Shutter keyper operators using the public Grafana dashboard.
