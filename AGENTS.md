@@ -255,12 +255,13 @@ one from a different report.
    `2026-10-02T20-27-16Z.json` is logged in `2026-10-02T20-27-16Z.sent.jsonl`. One line per send:
    `{"n":1,"userId":"...","messageId":"...","sentAt":"..."}`. Append it after each send, not once at
    the end, so a Run that stops early still records what it sent.
-8. **Always finish by telling the team what happened, in every Run where you sent anything.** This
-   is required, not optional, and it is a separate `POST /messages/` to the team. Say which draft
-   numbers were sent and to which groups, which failed, and which you are unsure about because the
-   call did not clearly succeed or fail. Say it even when every draft succeeded, and even when you
-   sent only one. A team that is told nothing cannot tell a successful send from a Run that stopped
-   half way.
+8. **In a Run about the weekly report, always finish by telling the team what happened when you
+   sent anything.** This applies to report Runs only; coordination rounds tell the team at the
+   proposal and after confirmation, as their own duty says. It is a separate `POST /messages/`
+   to the team. Say which draft numbers were sent and to which groups, which failed, and which
+   you are unsure about because the call did not clearly succeed or fail. Say it even when every
+   draft succeeded, and even when you sent only one. A team that is told nothing cannot tell a
+   successful send from a Run that stopped half way.
 
 The team's approval covers only the drafts they named in the report in front of you. It never
 carries to a later report, and it never covers a draft they did not name.
