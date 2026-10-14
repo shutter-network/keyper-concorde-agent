@@ -122,6 +122,52 @@ testScenario("restart", async (harness) => {
   await confirm(harness, monday);
 });
 
+testScenario("weekly-report", async (harness) => {
+  // The report file is the cron job's output; here it is a fixture with one draft for a.
+  const generatedAt = new Date().toISOString();
+  const stem = `${generatedAt.slice(0, 19).replace(/:/g, "-")}Z`;
+  const draft = {
+    n: 1, instance: instances.a, set: "api", kind: "offline", userId: harness.ids.a, group: "Operator A",
+    text: `Your Keyper ${instances.a} (API set) has been offline since 2026-10-13 09:00 UTC; its 7-day uptime is 71.4%.\n\nCould you please check the Keyper logs and confirm that your RPC node is online and reachable? Once it is working again, please restart the Keyper and let us know.\n\nThank you!`,
+  };
+  const row = (instance: string, online: "Yes" | "No", uptime7: string) => ({
+    instance, rows: [{ set: "api", online, uptime7, metrics: "Yes", upToDate: "Yes" }],
+  });
+  await harness.writeWorkspace(`reports/${stem}.json`, JSON.stringify({
+    reportDate: generatedAt.slice(0, 10), generatedAt, status: "ok", errors: [],
+    summary: {
+      groupsSeen: 2, keypersSeen: 2, counts: { offline: 1 },
+      rows: [
+        { group: "Operator A", userId: harness.ids.a, keypers: [row(instances.a, "No", "71.4%")] },
+        { group: "Operator B", userId: harness.ids.b, keypers: [row(instances.b, "Yes", "99.95%")] },
+      ],
+    },
+    drafts: [draft],
+  }, null, 2));
+
+  // Review: the team gets the summary and the draft, nobody else hears anything.
+  let run = await harness.send("team", "please read today's uptime report");
+  assertRecipients(run, ["team"]);
+  assert.ok(run.to("team").includes(draft.text.split("\n")[0]), `The team message does not show draft 1: ${run.to("team")}`);
+  assert.equal(await harness.readWorkspace(`reports/${stem}.sent.jsonl`), undefined, "Nothing may be logged as sent before approval");
+
+  // Approval: draft 1 goes to a, unchanged; the sent log has one line; the team hears the outcome.
+  run = await harness.send("team", "send 1");
+  assertRecipients(run, ["a", "team"]);
+  assert.equal(run.to("a").trim(), draft.text, "Draft 1 was not delivered with the file's text");
+  const log = (await harness.readWorkspace(`reports/${stem}.sent.jsonl`)) ?? "";
+  const lines = log.trim().split("\n").filter((line) => line !== "");
+  assert.equal(lines.length, 1, `Expected one sent-log line: ${JSON.stringify(log)}`);
+  assert.equal(JSON.parse(lines[0]).n, 1, `Sent log does not record draft 1: ${lines[0]}`);
+  assert.ok(lines[0].includes(harness.ids.a), `Sent log does not name a: ${lines[0]}`);
+
+  // A second approval of the same draft sends nothing.
+  run = await harness.send("team", "send 1");
+  assertRecipients(run, ["team"]);
+  const after = (await harness.readWorkspace(`reports/${stem}.sent.jsonl`)) ?? "";
+  assert.equal(after.trim().split("\n").length, 1, "The sent log grew on a repeated approval");
+});
+
 after(async () => {
   console.log(`\n${await readFile(transcriptPath, "utf8")}${transcriptPath}`);
 });

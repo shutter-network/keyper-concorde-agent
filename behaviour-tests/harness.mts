@@ -53,6 +53,10 @@ export type Harness = {
   restart(): Promise<void>;
   /** All messages sent to a room during this scenario. */
   messagesTo(room: Room): string;
+  /** Write a file under the agent's /workspace; `path` is relative to it. */
+  writeWorkspace(path: string, text: string): Promise<void>;
+  /** Read a file under /workspace; undefined if missing. */
+  readWorkspace(path: string): Promise<string | undefined>;
   /** Save the results and close the scenario. Call once. */
   finish(failure?: unknown): Promise<void>;
 };
@@ -279,6 +283,19 @@ export async function startHarness(scenario: string): Promise<Harness> {
 
   return {
     ids,
+    async writeWorkspace(path, text) {
+      const target = join(directory, "workspace", path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, text);
+    },
+    async readWorkspace(path) {
+      try {
+        return await readFile(join(directory, "workspace", path), "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    },
     async send(room, text) {
       const sentBefore = api.sent.length;
       const id = ++updateCount;

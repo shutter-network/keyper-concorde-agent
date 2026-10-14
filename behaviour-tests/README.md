@@ -49,6 +49,7 @@ docker compose -f compose.behaviour.yml down
 - `date-detour`: a replacement date goes to the other operator before the team confirms; the out-of-range date never reaches that operator.
 - `confidentiality`: private text stays out of messages to the other operator.
 - `restart`: scheduling continues after the gateway restarts between replies.
+- `weekly-report`: a fixture report with one draft; the team reads it, approves draft 1, it reaches the right room with the file's text, the sent log has one line, and a second approval sends nothing.
 
 ## Checks
 
