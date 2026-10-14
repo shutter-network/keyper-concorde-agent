@@ -19,6 +19,12 @@ import { startFakeBotApi } from "../telegram-channel/fake-bot-api.ts";
 import { createTelegramChannel } from "../telegram-channel/index.ts";
 import { applySchema, createTestDatabase } from "../telegram-channel/test-support.ts";
 
+// prompt.ts exists on the keyper-groups branch only. With it, the harness uses that branch's
+// wiring: group users with kind, keypers and operators, and its prompt template.
+type GroupsModule = { promptData: (message: MessageRecord, sender: unknown, attributes: unknown) => Record<string, unknown> };
+const groups: GroupsModule | undefined = await import("../prompt.ts").catch(() => undefined);
+export const instances: Readonly<Record<"a" | "b", string>> = { a: "kpr-one", b: "kpr-two" };
+
 const execute = promisify(execFile);
 
 export type Room = "team" | "a" | "b";
@@ -43,6 +49,8 @@ export type AgentRun = {
 
 export type Harness = {
   readonly ids: Readonly<Record<Room, string>>;
+  /** True on the keyper-groups branch. */
+  readonly groups: boolean;
   /** Send a message and wait for the agent to finish. */
   send(room: Room, text: string): Promise<AgentRun>;
   /** Restart the gateway. Workspace and sessions are kept. */
@@ -58,6 +66,13 @@ type SignalRow = { state: string; error: string | null };
 type Logger = Record<"debug" | "info" | "warn" | "error", (...args: unknown[]) => void>;
 
 // Keep this template in sync with main.ts.
+// Template from the keyper-groups branch's main.ts. Keep identical.
+const groupsTemplate = `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
+
+{{text}}
+
+Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`;
+
 const template = `A message arrived for you from user {{userId}}. They said:
 
 {{text}}
@@ -215,15 +230,22 @@ export async function startHarness(scenario: string): Promise<Harness> {
         const messenger = createMessenger({ db, users, worker, agentServer });
         const telegram = createTelegramChannel({
           db, messenger, token: "000000:TEST", apiBaseUrl: api.url, pollTimeoutSeconds: 1, retryDelayMs: 100, logger: log,
+          ...(groups ? { chatMode: "group" as const } : {}),
         });
         return { users, passwordAuth, messenger, telegram };
       },
-      handlers: ({ db, messenger }) => ({
+      handlers: ({ db, messenger, telegram, users }) => ({
         [messageReceivedKind]: {
           ...templateHandler<MessageRecord>({
-            template,
+            template: groups ? groupsTemplate : template,
             session: (signal) => `user_${signal.payload.userId}`,
-            data: (signal) => signal.payload,
+            data: groups
+              ? async (signal) => {
+                  const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
+                  const user = await users.get(signal.payload.userId);
+                  return groups.promptData(signal.payload, sender, user?.attributes);
+                }
+              : (signal) => signal.payload,
           }),
           async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
             if (outcome.failed) await db.tx((tx) => messenger.send(tx, signal.payload.userId, failureMessage));
@@ -238,13 +260,19 @@ export async function startHarness(scenario: string): Promise<Harness> {
   for (const room of rooms) {
     ids[room] = await gateway.components.db.tx(async (tx) => {
       const user = await gateway.components.users.create(tx);
-      await gateway.components.users.setAttributes(tx, user.id, { name: room === "team" ? "Test team" : `Operator ${room.toUpperCase()}` });
+      const name = room === "team" ? "Test team" : `Operator ${room.toUpperCase()}`;
+      await gateway.components.users.setAttributes(tx, user.id, groups
+        ? room === "team"
+          ? { kind: "teammate", name }
+          : { kind: "keyper", name, keypers: [{ instance: instances[room], set: "api" }], operators: [String(senderIds[room])] }
+        : { name });
       await gateway.components.telegram.recordChat(tx, user.id, String(chatIds[room]));
       return user.id;
     });
   }
+  // main's AGENTS.md names the team by user id; the groups branch identifies rooms by attributes.
   const instructions = await readFile("/config/AGENTS.md", "utf8");
-  assert.match(instructions, /^Team user: .+$/m, "AGENTS.md is missing a 'Team user:' line");
+  if (!groups) assert.match(instructions, /^Team user: .+$/m, "AGENTS.md is missing a 'Team user:' line");
   await writeFile(join(directory, "AGENTS.md"), instructions.replace(/^Team user: .+$/m, `Team user: ${ids.team}`));
   await gateway.start();
 
@@ -269,6 +297,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
 
   return {
     ids,
+    groups: groups !== undefined,
     async send(room, text) {
       const sentBefore = api.sent.length;
       const id = ++updateCount;

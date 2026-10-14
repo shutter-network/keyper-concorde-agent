@@ -12,6 +12,10 @@ and model configuration.
 
 Requires Docker Compose 2.17 or newer.
 
+Runs on main and on feat/keyper-groups. With `prompt.ts` present, the harness uses the groups
+branch's wiring and attributes, and the opening request names the keypers `kpr-one` and
+`kpr-two`.
+
 ## Run
 
 From this directory. `run.sh` passes the repository's `.env` to compose, so the provider key

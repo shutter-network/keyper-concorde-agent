@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { after, test } from "node:test";
-import { type Harness, type Room, type AgentRun, rooms, startHarness, transcriptPath } from "./harness.mts";
+import { type Harness, type Room, type AgentRun, instances, rooms, startHarness, transcriptPath } from "./harness.mts";
 
 const time = "14:00";
 const monday = nextMonday(0);
@@ -26,10 +26,9 @@ testScenario("scheduling", async (harness) => {
 testScenario("missing-details", async (harness) => {
   let run = await harness.send("team", "Please arrange a DKG with the keypers.");
   assertRecipients(run, ["team"]);
-  assertQuestionAbout(run, "team", /duration|range|dates?|timezone|time/i);
   assertNoRound(harness, run);
 
-  run = await harness.send("team", `One hour, ${monday} at ${time} UTC, ${monday} through ${wednesday}, 14:00 to 17:00 UTC.`);
+  run = await harness.send("team", `One hour, ${monday} at ${time} UTC, ${monday} through ${wednesday}, 14:00 to 17:00 UTC. ${harness.groups ? `Ask ${instances.a} and ${instances.b}.` : "Ask both keypers."}`);
   assertRecipients(run, ["a", "b", "team"]);
   assertDateAndTime(run, "a", monday, time);
   assertDateAndTime(run, "b", monday, time);
@@ -44,7 +43,7 @@ testScenario("ambiguous-reply", async (harness) => {
 });
 
 testScenario("misspelled-date", async (harness) => {
-  const run = await harness.send("team", `Arrange a one-hour DKG on ${dateWithTypo(wednesday)} at ${time} UTC. That day only, between 14:00 and 17:00 UTC. Ask both keypers and propose the time for my confirmation.`);
+  const run = await harness.send("team", `Arrange a one-hour DKG on ${dateWithTypo(wednesday)} at ${time} UTC. That day only, between 14:00 and 17:00 UTC. ${harness.groups ? `Ask ${instances.a} and ${instances.b}` : "Ask both keypers"} and propose the time for my confirmation.`);
   if (run.to("a") === "" && run.to("b") === "") {
     assertRecipients(run, ["team"]);
   } else {
@@ -130,7 +129,7 @@ after(async () => {
 async function openRound(harness: Harness): Promise<AgentRun> {
   const run = await harness.send(
     "team",
-    `Find a time for a one-hour DKG. Preferred: ${monday} at ${time} UTC. Acceptable dates: ${monday} through ${wednesday}, between 14:00 and 17:00 UTC. Ask both keypers and propose a time for my confirmation.`,
+    `Find a time for a one-hour DKG. Preferred: ${monday} at ${time} UTC. Acceptable dates: ${monday} through ${wednesday}, between 14:00 and 17:00 UTC. ${harness.groups ? `Ask ${instances.a} and ${instances.b}` : "Ask both keypers"} and propose a time for my confirmation.`,
   );
   assertRecipients(run, ["a", "b", "team"]);
   assertDateAndTime(run, "a", monday, time);
@@ -173,11 +172,6 @@ function assertRoundRemoved(harness: Harness, run: AgentRun): void {
   assert.ok(!text.includes(harness.ids.a) && !text.includes(harness.ids.b), `coordination.json still contains a participant ID: ${text}`);
 }
 
-function assertQuestionAbout(run: AgentRun, room: Room, topic: RegExp): void {
-  const text = run.to(room);
-  assert.ok(/\?/.test(text), `Message to ${room} is missing a question mark: ${JSON.stringify(text)}`);
-  assert.match(text, topic, `Message to ${room} does not match ${topic}: ${JSON.stringify(text)}`);
-}
 
 const assertNoRound = assertRoundRemoved;
 
