@@ -1,33 +1,30 @@
 # Keyper Concorde Agent
 
-Prototype. A Concorde deployment that lets Shutter keyper operators talk to one agent over
-Telegram, with every message recorded per user in the gateway. Runs on one droplet. No operator
-is connected yet; the only user is the person testing it.
+Concorde prototype for Shutter Keyper coordination, announcements and status checks over
+Telegram. Each registered group has a Concorde user ID and its own message log.
 
 Built from `examples/00_minimal` of `shutter-network/concorde` at commit `e3f746e`, with:
 
-- `telegram-channel/`, a Channel for the Telegram Bot API, written against the Messenger's
-  Channel contract and modelled on the framework's Nostr Channel. It replaces the HTTP Channel.
-  Meant to move into Concorde as `@shutter-network/concorde/telegram-channel` once it has run.
-- `main.ts` forwards whichever provider keys are set instead of requiring the Anthropic one,
-  mounts `models.json` into the agent container, and attaches the tester's chat to the seeded
-  user at boot.
-- `settings.json` and `models.json` point pi at an OpenAI-compatible endpoint of your choice.
-  Both are per machine, copied from their `.example` files and never committed.
-- `AGENTS.md` adds the Grafana dashboard instructions.
+- `telegram-channel/` implements the Messenger Channel interface using the Telegram Bot API.
+  It replaces the HTTP Channel.
+- `main.ts` configures the Gateway, agent runtime and message handler. Register groups with
+  `admin.ts`; startup does not create users or attach chats.
+- `settings.json` selects the provider and model; `models.json` configures custom endpoints.
+  Copy the `.example` files for each deployment. Do not commit the local configuration.
+- `AGENTS.md` defines coordination, announcement and Grafana status duties.
+- `SYSTEM.md` replaces Pi's built-in system prompt. Pi appends the project instructions.
 
 ## The framework dependency
 
-`@shutter-network/concorde` is not on npm yet (issue 01 on the Concorde review). Until it is,
-the image installs it from a tarball in `vendor/` that is never committed: `.gitignore` excludes
-it, and each machine that builds the image produces its own.
+This deployment installs `@shutter-network/concorde` from a local tarball in `vendor/`.
+Build the pinned framework version before building the deployment. The tarball is ignored by Git.
 
 ```sh
 cd path/to/concorde && git checkout e3f746e && npm ci && npm run build && npm pack
 mv shutter-network-concorde-0.1.0.tgz path/to/this/repo/vendor/
 ```
 
-When the package is published, `package.json` goes back to `"^0.1.0"` and `vendor/` is deleted.
+Switching to a published package will require updating the dependency and Dockerfiles.
 
 ## Before the first run
 
@@ -52,30 +49,23 @@ docker compose up -d --build
 docker compose logs -f gateway
 ```
 
-Nothing is seeded at boot and no chat is attached, so the log stays quiet until a message
-arrives. Register a group as below, then write in it and the reply comes back to the group.
+Register a group as described below, then send the bot a message in that group.
 
 ## Groups
 
-A room is one user. A **keyper room** covers a set of keypers and holds the operators who run them,
-and all of them answer for every keyper the room covers. Only they write
-there; teammates are in it and read. The **teammate chat** covers none, holds
-teammates, and any keyper may be asked about. Every reply reaches everyone in the room it is sent to.
-A keyper is identified by its **instance and keyperset**.
+Each Telegram group maps to one Concorde user. A **keyper group** covers all Keypers run by
+its operators, identified by `(instance, set)`, where `set` is `api` or `gnosis`. Configure
+Telegram permissions so only those operators can post; team members can remain as observers.
+A **teammate group** can ask about any Keyper and request coordination or announcements.
+Replies are visible to everyone in the recipient group.
 
-Two separate things decide the operator. Telegram's posting permission decides who **may** write in
-a keyper room; `add-operator` records **which sender id** that human is, so the agent can be told
-whether an operator or a teammate wrote. A room whose permissions are wrong, or a teammate made
-admin, would be read as the operator. It is a soft boundary like the keyper scope, not a control.
+Telegram permissions control who can post. `add-operator` separately registers sender IDs
+for the role label passed to the model. The label does not grant API permissions or enforce
+access control.
 
-**Private 1:1 chats are not served.** `main.ts` pins the Channel to groups, so a direct message
-is answered once with "This agent answers in group chats only, and not in direct messages" and
-dropped. It is never told its chat id, because the check runs before the chat is looked up.
-
-A message from a **group** that belongs to no user gets one answer carrying its own chat id and
-the sender id of whoever wrote, and nothing is recorded. That is how both ids reach whoever
-registers the group. `admin.ts` does the rest, against the database, with or without the gateway
-running:
+Private chats receive a group-only notice, without registration IDs. Their messages are not stored.
+Unregistered groups receive their chat ID and, if available, the sender's ID. Use these IDs to
+register the group. `admin.ts` accesses the database directly and does not require a running Gateway:
 
 ```sh
 docker compose run --rm --no-deps gateway node admin.ts list-chats
@@ -92,43 +82,29 @@ docker compose run --rm --no-deps gateway node admin.ts remove-chat <chatId>
 
 | command | what it does |
 |---|---|
-| `list-chats` | one line per chat: chat id, kind, name, what it covers, operators, user id |
-| `add-keyper-chat` | creates a **keyper chat**: a set of keypers, written in only by their operators. `<name>` names those operators. One transaction, so a chat nobody can reach never exists. |
-| `add-keypers` | adds any number of keypers to an existing chat and leaves the rest alone. A pair the chat already holds is kept once. |
-| `remove-keypers` | clears the chat's whole list. It covers nothing until `add-keypers` runs, so the two go together when changing a group. |
-| `add-teammate-chat` | creates a **teammate chat**: no keyper, written in by teammates, any keyper may be asked about. Its own command so the kind is typed rather than arrived at by omitting an argument. |
-| `list-members` | everyone who has written to that room: sender id, `@handle` or first name, role, when. Plus any recorded operator who has not written. A reader is invisible: Telegram names a sender only on a message. |
-| `add-operator` / `remove-operator` | records which sender id is the operator. Warns if they have never written there, but records them anyway. |
-| `attach-chat` | gives an existing user a chat. The only command taking a **user id**, which `list-chats` prints last, because you reach for it exactly when the chat id is wrong or missing |
-| `remove-chat` | removes the chat only: the framework removes no user, and the message log stays. Names the kind and name of what it removed, so a mistyped id is visible in the output. |
+| `list-chats` | Lists chat ID, kind, name, Keypers, operator IDs and user ID. |
+| `add-keyper-chat` | Creates the user, Keyper assignments and chat mapping in one transaction. `<name>` identifies the operator group. |
+| `add-keypers` | Adds `(instance, set)` pairs without removing existing entries or duplicating them. |
+| `remove-keypers` | Clears all Keyper assignments. Run `add-keypers` before using the group again. |
+| `add-teammate-chat` | Registers a team group without Keyper assignments. |
+| `list-members` | Lists observed senders and registered operators, with available names, roles and last-message times. It cannot list members who have never posted unless registered as operators. |
+| `add-operator` / `remove-operator` | Adds or removes a registered operator sender ID. Adding an unseen sender produces a warning. |
+| `attach-chat` | Links a chat to an existing user ID from `list-chats`. |
+| `remove-chat` | Removes the chat mapping but preserves the user, attributes and message history. |
 
-The keyper is the Grafana `instance` label and **nothing validates it**. A typo registers
-cleanly and then answers "no series" forever.
+Instance names are not checked against Grafana. A misspelled name can be registered and will
+produce missing-series results.
 
-Roles carry no privilege. The agent answers an operator and a teammate identically; the label
-exists so it can name who runs the keyper, and so the log carries that afterwards.
-
-**What a question may be about follows the room, not the role.** In a keyper room the agent answers
-about that room's keypers only, and a question about another is turned back with the names of the
-keypers this room covers. In the teammate chat it answers about whichever keyper the question names,
-and asks which one if the question names none. So the same person asking the same question gets an
-answer in one room and a redirection in the other. The room decides, not who they are. That scope
-is **soft**: it is an instruction in `AGENTS.md` and nothing more.
+`AGENTS.md` restricts a keyper group's status requests to its registered Keypers. Team groups
+may ask about any Keyper. These scope rules are prompt instructions, not API access controls.
 
 ### One chat per operator, and moving it
 
-A room belongs to one set of operators and covers every keyper they run, so a keyper is reached in
-exactly one place. Concretely: an `(instance, set)` pair has exactly **one** chat, and the add
-commands **refuse** a second. Two rooms holding one pair means two places its operators are written
-to and two places they answer from, with nothing to say which one is the keyper's.
+Keep an operator's Keypers in one group. Registration commands reject `(instance, set)` pairs
+already assigned to another group. To add more Keypers, use `add-keypers` on the existing group.
 
-Adding a keyper to an operator who already has a room is `add-keypers` on that room, not a second
-room. A second room would split their keypers across two places, and a round would then wait on
-both.
-
-**To move a whole room to a different chat, do not register it again.** `add-keyper-chat` creates a
-*new* user, stranding the old one's message log, its recorded operators and its history. Move it
-instead:
+To change the group's Telegram chat ID, preserve its Concorde user ID. Registering a new user
+would create a separate message history. Detach the old chat and attach the new one:
 
 ```sh
 admin.ts list-chats                     # note the user id, last column
@@ -136,39 +112,33 @@ admin.ts remove-chat <oldChatId>
 admin.ts attach-chat <userId> <newChatId>
 ```
 
-The user, its keypers, its operators and its whole log come with it.
-
-This is also the recovery when **Telegram changes a group's id** on upgrading a basic group to a
-supergroup: the cause differs, the fix does not.
+This preserves the user, Keyper assignments, operator IDs and message history. Use the same
+procedure if a Telegram group migration changes its chat ID.
 
 ## Coordination
 
-The teammate chat can set two things in motion across every keyper room. A keyper room cannot ask
-for either; the agent turns it back.
+Only a teammate group may request announcements or coordination rounds.
 
-**Announcements.** One message to each keyper's own room, and nothing is waited for. The teammate
-chat supplies the text; the agent writes it to every keyper room and reports which sends succeeded.
+- Announcements: send the team's message once to each matching group and report delivery results.
+- Rounds: collect availability, propose a common time for team approval, then notify participants.
+  If there is no overlap, ask about alternatives or request a wider date range from the team.
 
-**Rounds.** Ask every operator of a keyperset for a time window. The agent asks each room, collects
-the replies as they come, and reports to the teammate chat once all of them are in. If the windows
-do not all overlap it says so and asks what to do; it never picks a time itself.
-
-Both are driven entirely by `AGENTS.md`. The agent uses `GET /users/` to find the rooms,
-`POST /messages/` to write, and keeps round state in a file at `/workspace/coordination.json`.
+The agent follows `AGENTS.md`, selects recipients through `GET /users/`, sends through
+`POST /messages/`, and stores active rounds in `/workspace/coordination.json`.
 
 ## Weekly uptime report
 
-Two halves that meet in a file, and never call each other.
+The report generator writes a file that the agent reads when the Scheduler wakes it.
 
-**`report-cron` builds the report.** It reads the registered groups from the database, asks Grafana
-for the numbers, and writes `/workspace/reports/<date>T<time>Z.json`. It never touches the agent or
-the gateway, so a slow or failing report cannot hold up the Signal worker.
+**`report-cron` builds the report.** It reads the registered groups from the database, queries
+Grafana, and writes `/workspace/reports/<date>T<time>Z.json`. It runs independently of the agent
+and Gateway, so report generation does not block the Signal worker.
 
 **The Scheduler wakes the agent.** The agent reads the newest report for today and
-posts a summary to the teammate chat. It builds nothing and recalculates nothing.
+posts a summary to the teammate chat. It uses the generated results without recalculating them.
 
-Only **registered** keypers are in the report. A keyper the fleet runs but nobody has registered has
-no group to message and no recorded keyperset, so it is left out rather than listed as a gap.
+The report includes only **registered** Keypers. Unregistered Keypers have no recipient group or
+configured keyperset and are omitted from the report.
 
 Every registered keyper appears in the summary, healthy or not. Only the ones with a problem get a
 **draft**: a message written for that operator, numbered, which the team approves before anything is
@@ -176,9 +146,9 @@ sent. The problems are: no metrics at all, offline, online but not syncing, runn
 and running a keyperset other than the expected one. `report/releases.json` holds the expected
 release and keyperset for each set.
 
-Nothing reaches an operator without the team approving draft for them.
+The agent sends drafts to operators only after team approval.
 
-### Triggering either half by hand
+### Running report generation and delivery manually
 
 Build a report now.
 
@@ -222,6 +192,10 @@ Or anywhere with Node 24 and a PostgreSQL to create databases on:
 DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 ```
 
+For real-model coordination tests with simulated Telegram chats, see
+[behaviour-tests/README.md](behaviour-tests/README.md). These tests use a separate database,
+workspace and sessions, and incur model API costs.
+
 ## Operating notes
 
 - The model is chosen in `settings.json` and described in `models.json`. After changing the
@@ -230,7 +204,7 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 - A run that fails tells the sender "I could not process your last message" through the
   handler's `post` phase, and nothing more. The reason is in `docker compose logs gateway`, as
   the error on the `Run finished` line, and in the agent container's own log while it runs:
-  `docker logs $(docker ps -q --filter ancestor=keyper-concorde-agent:0.83.0)`.
+  `docker logs $(docker ps -q --filter ancestor=keyper-concorde-agent:1.2.0)`.
 - If the model endpoint is down, every message looks like the agent is offline. Test the
   endpoint directly with a one-word chat completion before debugging anything here, with
   `BASE_URL`, `API_KEY` and `MODEL` set to the values from `models.json` and `settings.json`:
@@ -243,8 +217,8 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
     -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the single word OK.\"}],\"max_tokens\":50}"
   ```
 
-  A healthy endpoint answers within seconds with `HTTP 200`. A timeout or `HTTP 000` means the
-  box behind the proxy is down, and nothing in this repo can fix that.
+  `HTTP 200` confirms the endpoint accepted this request. A timeout or `HTTP 000` means no HTTP
+  response was received; check connectivity, the proxy and the model service.
 - `docker compose down` keeps the database. `down -v` deletes it, including the user, its chat
   and the whole message log.
 
@@ -252,12 +226,14 @@ DATABASE_URL=postgres://user:password@host:5432/postgres npm test
 
 | file | role |
 |---|---|
-| `main.ts` | the deployment: runtime, components, handler, seeding |
-| `admin.ts` | registering groups, their keyper and their operators |
-| `prompt.ts` | what the agent is told about one Message, assembled and testable |
+| `main.ts` | Gateway components, agent runtime and message handler |
+| `admin.ts` | Group registration, Keyper assignments and operator IDs |
+| `prompt.ts` | Validates group attributes and builds message context for the agent |
 | `telegram-channel/` | the Telegram Channel: schema, chats, outbox, Bot API, channel |
 | `compose.yml` | gateway, migrate, postgres, agent image |
 | `AGENTS.md` | the agent's instructions, mounted read-only |
+| `SYSTEM.md` | Pi system-prompt override, mounted read-only |
+| `behaviour-tests/` | Real-model coordination scenarios and test runner |
 | `settings.json`, `models.json` | pi's model configuration, mounted read-only |
 | `schema.ts`, `drizzle.config.ts` | tables the deployment applies with drizzle-kit |
 | `report/` | the weekly report: Grafana reads, findings, drafts, and the file it writes |
