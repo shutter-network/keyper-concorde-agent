@@ -123,8 +123,8 @@ testScenario("restart", async (harness) => {
   await confirm(harness, monday);
 });
 
-// KEYPERS operator rooms. All accept but the last, who offers an in-range alternative; the
-// agent checks it with the others only, proposes once they agree, and notifies everyone.
+// The last operator offers an alternative within the allowed range. The agent asks the others
+// directly or after asking the team, then proposes the time and waits for team confirmation.
 testScenario("many-keypers", async (harness) => {
   assert.ok(harness.operators.length >= 2, "many-keypers requires at least two operator rooms");
   await openRound(harness);
@@ -166,7 +166,7 @@ testScenario("many-keypers", async (harness) => {
 }, { keypers: manyKeypers });
 
 testScenario("weekly-report", async (harness) => {
-  // The report file is the cron job's output; here it is a fixture with one draft for a.
+  // Use a fixture report with one draft for operator a instead of running the cron job.
   const generatedAt = new Date().toISOString();
   const stem = `${generatedAt.slice(0, 19).replace(/:/g, "-")}Z`;
   const draft = {
@@ -188,13 +188,13 @@ testScenario("weekly-report", async (harness) => {
     drafts: [draft],
   }, null, 2));
 
-  // Review: the team gets the summary and the draft, nobody else hears anything.
+  // Only the team receives the report for review; no delivery is logged before approval.
   let run = await harness.send("team", "please read today's uptime report");
   assertRecipients(run, ["team"]);
   assert.ok(run.to("team").includes(draft.text.split("\n")[0]), `The team message does not show draft 1: ${run.to("team")}`);
   assert.equal(await harness.readWorkspace(`reports/${stem}.sent.jsonl`), undefined, "Nothing may be logged as sent before approval");
 
-  // Approval: draft 1 goes to a, unchanged; the sent log has one line; the team hears the outcome.
+  // Approval sends draft 1 unchanged to a, notifies the team, and creates one send-log entry.
   run = await harness.send("team", "send 1");
   assertRecipients(run, ["a", "team"]);
   assert.equal(run.to("a").trim(), draft.text, "Draft 1 was not delivered with the file's text");
@@ -204,7 +204,7 @@ testScenario("weekly-report", async (harness) => {
   assert.equal(JSON.parse(lines[0]).n, 1, `Sent log does not record draft 1: ${lines[0]}`);
   assert.ok(lines[0].includes(harness.ids.a), `Sent log does not name a: ${lines[0]}`);
 
-  // A second approval of the same draft sends nothing.
+  // Repeated approval must not resend the operator's draft or add another send-log entry.
   run = await harness.send("team", "send 1");
   assertRecipients(run, ["team"]);
   const after = (await harness.readWorkspace(`reports/${stem}.sent.jsonl`)) ?? "";

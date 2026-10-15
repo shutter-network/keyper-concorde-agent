@@ -128,17 +128,17 @@ The agent follows `AGENTS.md`, selects recipients through `GET /users/`, sends t
 
 ## Weekly uptime report
 
-Two halves that meet in a file, and never call each other.
+The report generator writes a file that the agent reads when the Scheduler wakes it.
 
-**`report-cron` builds the report.** It reads the registered groups from the database, asks Grafana
-for the numbers, and writes `/workspace/reports/<date>T<time>Z.json`. It never touches the agent or
-the gateway, so a slow or failing report cannot hold up the Signal worker.
+**`report-cron` builds the report.** It reads the registered groups from the database, queries
+Grafana, and writes `/workspace/reports/<date>T<time>Z.json`. It runs independently of the agent
+and Gateway, so report generation does not block the Signal worker.
 
 **The Scheduler wakes the agent.** The agent reads the newest report for today and
-posts a summary to the teammate chat. It builds nothing and recalculates nothing.
+posts a summary to the teammate chat. It uses the generated results without recalculating them.
 
-Only **registered** keypers are in the report. A keyper the fleet runs but nobody has registered has
-no group to message and no recorded keyperset, so it is left out rather than listed as a gap.
+The report includes only **registered** Keypers. Unregistered Keypers have no recipient group or
+configured keyperset and are omitted from the report.
 
 Every registered keyper appears in the summary, healthy or not. Only the ones with a problem get a
 **draft**: a message written for that operator, numbered, which the team approves before anything is
@@ -146,9 +146,9 @@ sent. The problems are: no metrics at all, offline, online but not syncing, runn
 and running a keyperset other than the expected one. `report/releases.json` holds the expected
 release and keyperset for each set.
 
-Nothing reaches an operator without the team approving draft for them.
+The agent sends drafts to operators only after team approval.
 
-### Triggering either half by hand
+### Running report generation and delivery manually
 
 Build a report now.
 
