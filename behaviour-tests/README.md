@@ -50,6 +50,7 @@ docker compose -f compose.behaviour.yml down
 - `confidentiality`: private text stays out of messages to the other operator.
 - `restart`: scheduling continues after the gateway restarts between replies.
 - `weekly-report`: a fixture report with one draft; the team reads it, approves draft 1, it reaches the right room with the file's text, the sent log has one line, and a second approval sends nothing.
+- `many-keypers`: `KEYPERS` operator rooms, default 5; all accept but the last, who offers an in-range alternative; it is checked with the others only, proposed when they agree, confirmed to everyone. `KEYPERS=8 ./run.sh many-keypers`.
 
 ## Checks
 

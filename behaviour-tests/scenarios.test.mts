@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { after, test } from "node:test";
-import { type Harness, type Room, type AgentRun, instances, rooms, startHarness, transcriptPath } from "./harness.mts";
+import { type Harness, type HarnessOptions, type Room, type AgentRun, startHarness, transcriptPath } from "./harness.mts";
 
 const time = "14:00";
 const monday = nextMonday(0);
 const wednesday = nextMonday(2);
 const thursday = nextMonday(3);
 const privateMarker = "private-reference-cedar-7421";
+/** Operator rooms for the many-keypers scenario. */
+const manyKeypers = Number(process.env.KEYPERS || 5);
 
 testScenario("scheduling", async (harness) => {
   await openRound(harness);
@@ -28,10 +30,9 @@ testScenario("missing-details", async (harness) => {
   assertRecipients(run, ["team"]);
   assertNoRound(harness, run);
 
-  run = await harness.send("team", `One hour, ${monday} at ${time} UTC, ${monday} through ${wednesday}, 14:00 to 17:00 UTC. Ask ${instances.a} and ${instances.b}.`);
-  assertRecipients(run, ["a", "b", "team"]);
-  assertDateAndTime(run, "a", monday, time);
-  assertDateAndTime(run, "b", monday, time);
+  run = await harness.send("team", `One hour, ${monday} at ${time} UTC, ${monday} through ${wednesday}, 14:00 to 17:00 UTC. Ask ${instanceList(harness)}.`);
+  assertRecipients(run, harness.rooms);
+  for (const room of harness.operators) assertDateAndTime(run, room, monday, time);
   assertRoundHasParticipants(harness, run);
 });
 
@@ -43,13 +44,12 @@ testScenario("ambiguous-reply", async (harness) => {
 });
 
 testScenario("misspelled-date", async (harness) => {
-  const run = await harness.send("team", `Arrange a one-hour DKG on ${dateWithTypo(wednesday)} at ${time} UTC. That day only, between 14:00 and 17:00 UTC. Ask ${instances.a} and ${instances.b} and propose the time for my confirmation.`);
-  if (run.to("a") === "" && run.to("b") === "") {
+  const run = await harness.send("team", `Arrange a one-hour DKG on ${dateWithTypo(wednesday)} at ${time} UTC. That day only, between 14:00 and 17:00 UTC. Ask ${instanceList(harness)} and propose the time for my confirmation.`);
+  if (harness.operators.every((room) => run.to(room) === "")) {
     assertRecipients(run, ["team"]);
   } else {
-    assertRecipients(run, ["a", "b", "team"]);
-    assertDateAndTime(run, "a", wednesday, time);
-    assertDateAndTime(run, "b", wednesday, time);
+    assertRecipients(run, harness.rooms);
+    for (const room of harness.operators) assertDateAndTime(run, room, wednesday, time);
   }
 });
 
@@ -70,7 +70,8 @@ testScenario("date-detour", async (harness) => {
   assertRecipients(run, ["b"]);
 
   run = await harness.send("b", `${thursday} at ${time}.`);
-  assertRecipients(run, ["b"]);
+  // The instructions allow asking the team to widen the range here, so the team may hear.
+  assertRecipients(run, ["b"], ["team"]);
   assertRoundHasParticipants(harness, run);
 
   run = await harness.send("b", `${wednesday} at ${time}.`);
@@ -122,13 +123,55 @@ testScenario("restart", async (harness) => {
   await confirm(harness, monday);
 });
 
+// KEYPERS operator rooms. All accept but the last, who offers an in-range alternative; the
+// agent checks it with the others only, proposes once they agree, and notifies everyone.
+testScenario("many-keypers", async (harness) => {
+  assert.ok(harness.operators.length >= 2, "many-keypers requires at least two operator rooms");
+  await openRound(harness);
+  const last = harness.operators[harness.operators.length - 1];
+  const others = harness.operators.slice(0, -1);
+
+  let run: AgentRun;
+  for (const room of others) {
+    run = await harness.send(room, "Yes, that works.");
+    assertRecipients(run, [room]);
+  }
+
+  run = await harness.send(last, `No, that doesn't work. ${wednesday} at ${time} works for me.`);
+  assertRoundHasParticipants(harness, run);
+  if (run.to("team") !== "") {
+    // The instructions let the agent ask the team before re-asking the others.
+    assertRecipients(run, ["team"], [last]);
+    run = await harness.send("team", `Yes, ask ${instanceList(harness, others)} whether ${wednesday} at ${time} UTC works.`);
+    assertRecipients(run, others, ["team"]);
+  } else {
+    // Or the agent can check the in-range alternative with all other participants directly.
+    assertRecipients(run, others, [last]);
+  }
+  for (const room of others) assertDateAndTime(run, room, wednesday, time);
+
+  for (const [index, room] of others.entries()) {
+    run = await harness.send(room, "Yes, that works.");
+    const final = index === others.length - 1;
+    assertRecipients(run, final ? [room, "team"] : [room]);
+    if (final) assertDateAndTime(run, "team", wednesday, time);
+  }
+
+  await confirm(harness, wednesday);
+  for (const room of harness.operators) {
+    for (const other of harness.operators) {
+      if (other !== room) assertNeverSentTo(harness, room, harness.ids[other]);
+    }
+  }
+}, { keypers: manyKeypers });
+
 testScenario("weekly-report", async (harness) => {
   // The report file is the cron job's output; here it is a fixture with one draft for a.
   const generatedAt = new Date().toISOString();
   const stem = `${generatedAt.slice(0, 19).replace(/:/g, "-")}Z`;
   const draft = {
-    n: 1, instance: instances.a, set: "api", kind: "offline", userId: harness.ids.a, group: "Operator A",
-    text: `Your Keyper ${instances.a} (API set) has been offline since 2026-10-13 09:00 UTC; its 7-day uptime is 71.4%.\n\nCould you please check the Keyper logs and confirm that your RPC node is online and reachable? Once it is working again, please restart the Keyper and let us know.\n\nThank you!`,
+    n: 1, instance: harness.instance("a"), set: "api", kind: "offline", userId: harness.ids.a, group: "Operator A",
+    text: `Your Keyper ${harness.instance("a")} (API set) has been offline since 2026-10-13 09:00 UTC; its 7-day uptime is 71.4%.\n\nCould you please check the Keyper logs and confirm that your RPC node is online and reachable? Once it is working again, please restart the Keyper and let us know.\n\nThank you!`,
   };
   const row = (instance: string, online: "Yes" | "No", uptime7: string) => ({
     instance, rows: [{ set: "api", online, uptime7, metrics: "Yes", upToDate: "Yes" }],
@@ -138,8 +181,8 @@ testScenario("weekly-report", async (harness) => {
     summary: {
       groupsSeen: 2, keypersSeen: 2, counts: { offline: 1 },
       rows: [
-        { group: "Operator A", userId: harness.ids.a, keypers: [row(instances.a, "No", "71.4%")] },
-        { group: "Operator B", userId: harness.ids.b, keypers: [row(instances.b, "Yes", "99.95%")] },
+        { group: "Operator A", userId: harness.ids.a, keypers: [row(harness.instance("a"), "No", "71.4%")] },
+        { group: "Operator B", userId: harness.ids.b, keypers: [row(harness.instance("b"), "Yes", "99.95%")] },
       ],
     },
     drafts: [draft],
@@ -172,33 +215,36 @@ after(async () => {
   console.log(`\n${await readFile(transcriptPath, "utf8")}${transcriptPath}`);
 });
 
+/** "kpr-a and kpr-b", or "kpr-a, kpr-b and kpr-c". */
+function instanceList(harness: Harness, operators: readonly Room[] = harness.operators): string {
+  const names = operators.map((room) => harness.instance(room));
+  return names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 async function openRound(harness: Harness): Promise<AgentRun> {
   const run = await harness.send(
     "team",
-    `Find a time for a one-hour DKG. Preferred: ${monday} at ${time} UTC. Acceptable dates: ${monday} through ${wednesday}, between 14:00 and 17:00 UTC. Ask ${instances.a} and ${instances.b} and propose a time for my confirmation.`,
+    `Find a time for a one-hour DKG. Preferred: ${monday} at ${time} UTC. Acceptable dates: ${monday} through ${wednesday}, between 14:00 and 17:00 UTC. Ask ${instanceList(harness)} and propose a time for my confirmation.`,
   );
-  assertRecipients(run, ["a", "b", "team"]);
-  assertDateAndTime(run, "a", monday, time);
-  assertDateAndTime(run, "b", monday, time);
+  assertRecipients(run, harness.rooms);
+  for (const room of harness.operators) assertDateAndTime(run, room, monday, time);
   assertRoundHasParticipants(harness, run);
   return run;
 }
 
 async function confirm(harness: Harness, date: string): Promise<AgentRun> {
   const run = await harness.send("team", "Confirmed.");
-  assertRecipients(run, ["a", "b", "team"]);
-  assertDateAndTime(run, "a", date, time);
-  assertDateAndTime(run, "b", date, time);
+  assertRecipients(run, harness.rooms);
+  for (const room of harness.operators) assertDateAndTime(run, room, date, time);
   assertRoundRemoved(harness, run);
   return run;
 }
 
 function assertRecipients(run: AgentRun, expected: readonly Room[], optional: readonly Room[] = []): void {
-  const recipients = rooms.filter((room) => run.to(room) !== "");
   for (const room of expected) {
-    assert.ok(recipients.includes(room), `No message sent to ${room}; sent: ${JSON.stringify(run.sent)}`);
+    assert.ok(run.recipients.includes(room), `No message sent to ${room}; sent: ${JSON.stringify(run.sent)}`);
   }
-  for (const room of recipients) {
+  for (const room of run.recipients) {
     assert.ok(expected.includes(room) || optional.includes(room), `Unexpected message to ${room}; sent: ${JSON.stringify(run.sent)}`);
   }
 }
@@ -210,14 +256,15 @@ function assertDateAndTime(run: AgentRun, room: Room, date: string, expectedTime
 
 function assertRoundHasParticipants(harness: Harness, run: AgentRun): void {
   const text = fileText(run);
-  assert.ok(text.includes(harness.ids.a) && text.includes(harness.ids.b), `coordination.json is missing one or both participant IDs: ${text}`);
+  const missing = harness.operators.filter((room) => !text.includes(harness.ids[room]));
+  assert.equal(missing.length, 0, `coordination.json is missing participant IDs for ${missing.join(", ")}: ${text}`);
 }
 
 function assertRoundRemoved(harness: Harness, run: AgentRun): void {
   const text = fileText(run);
-  assert.ok(!text.includes(harness.ids.a) && !text.includes(harness.ids.b), `coordination.json still contains a participant ID: ${text}`);
+  const present = harness.operators.filter((room) => text.includes(harness.ids[room]));
+  assert.equal(present.length, 0, `coordination.json still contains participant IDs for ${present.join(", ")}: ${text}`);
 }
-
 
 const assertNoRound = assertRoundRemoved;
 
@@ -230,9 +277,9 @@ function fileText(run: AgentRun): string {
   return run.file === undefined ? "" : JSON.stringify(run.file);
 }
 
-function testScenario(name: string, runScenario: (harness: Harness) => Promise<void>): void {
+function testScenario(name: string, runScenario: (harness: Harness) => Promise<void>, options?: HarnessOptions): void {
   test(name, async () => {
-    const harness = await startHarness(name);
+    const harness = await startHarness(name, options);
     try {
       await runScenario(harness);
     } catch (failure) {

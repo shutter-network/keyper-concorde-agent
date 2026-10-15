@@ -27,6 +27,7 @@ services:
       KEYPER_TESTS_DIR: ${PWD}
       AGENT_IMAGE: keyper-behaviour-agent:local
       TURN_TIMEOUT_SECONDS: ${TURN_TIMEOUT_SECONDS:-600}
+      KEYPERS: ${KEYPERS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LOCAL_API_KEY: ${LOCAL_API_KEY:-}
     volumes:

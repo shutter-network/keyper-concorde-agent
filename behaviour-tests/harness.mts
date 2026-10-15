@@ -20,15 +20,15 @@ import { createTelegramChannel } from "../telegram-channel/index.ts";
 import { applySchema, createTestDatabase } from "../telegram-channel/test-support.ts";
 import { promptData } from "../prompt.ts";
 
-/** Test Keyper instances, both in the API set. */
-export const instances: Readonly<Record<"a" | "b", string>> = { a: "kpr-one", b: "kpr-two" };
-
 const execute = promisify(execFile);
 
-export type Room = "team" | "a" | "b";
-export const rooms: readonly Room[] = ["team", "a", "b"];
-const chatIds: Readonly<Record<Room, number>> = { team: -100800001, a: -100800002, b: -100800003 };
-const senderIds: Readonly<Record<Room, number>> = { team: 900001, a: 900002, b: 900003 };
+/** "team", then one operator room per keyper: "a", "b", ... Each operator room covers `kpr-<room>`, API set. */
+export type Room = string;
+
+export type HarnessOptions = {
+  /** Operator rooms to create. Default 2. */
+  readonly keypers?: number;
+};
 
 export const runId = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
 export const transcriptPath = join("/results", runId, "transcript.txt");
@@ -39,6 +39,8 @@ export type AgentRun = {
   readonly from: Room;
   readonly text: string;
   readonly sent: readonly Sent[];
+  /** Rooms that received at least one message from this run, in room order. */
+  readonly recipients: readonly Room[];
   /** Parsed coordination.json, or undefined if the file does not exist. */
   readonly file: unknown;
   /** Messages from this run to one room, joined with newlines. */
@@ -47,6 +49,12 @@ export type AgentRun = {
 
 export type Harness = {
   readonly ids: Readonly<Record<Room, string>>;
+  /** "team" followed by the operator rooms. */
+  readonly rooms: readonly Room[];
+  /** The operator rooms, "a", "b", ... */
+  readonly operators: readonly Room[];
+  /** The keyper instance an operator room covers. */
+  instance(room: Room): string;
   /** Send a message and wait for the agent to finish. */
   send(room: Room, text: string): Promise<AgentRun>;
   /** Restart the gateway. Workspace and sessions are kept. */
@@ -103,10 +111,10 @@ function oneLine(text: string): string {
   return flat.length <= textWidth ? flat : `${flat.slice(0, textWidth - 1)}…`;
 }
 
-function fileSummary(file: unknown, ids: Readonly<Record<Room, string>>): string {
+function fileSummary(file: unknown, operators: readonly Room[], ids: Readonly<Record<Room, string>>): string {
   if (file === undefined) return "none";
   const text = JSON.stringify(file);
-  const named = rooms.filter((room) => room !== "team" && text.includes(ids[room]));
+  const named = operators.filter((room) => text.includes(ids[room]));
   return named.length === 0 ? "empty" : `round with ${named.join(", ")}`;
 }
 
@@ -132,14 +140,14 @@ async function modelThatRan(sessionsDir: string): Promise<string | undefined> {
   return undefined;
 }
 
-function transcriptBlock(scenario: string, runs: readonly AgentRun[], ids: Readonly<Record<Room, string>>, ran: string | undefined, failure?: string): string {
+function transcriptBlock(scenario: string, runs: readonly AgentRun[], operators: readonly Room[], ids: Readonly<Record<Room, string>>, ran: string | undefined, failure?: string): string {
   const arrow = (from: string, to: string) => `${from.padEnd(4)} -> ${to.padEnd(4)}  `;
   const lines = [`${scenario}  ${failure === undefined ? "PASS" : "FAIL"}  ${runs.length} runs, ran ${ran ?? "no model"}`, ""];
   let previousFile = "";
   for (const run of runs) {
     lines.push(`${arrow(run.from, "bot")}${oneLine(run.text)}`);
     for (const message of run.sent) lines.push(`${arrow("bot", message.to)}${oneLine(message.text)}`);
-    const file = fileSummary(run.file, ids);
+    const file = fileSummary(run.file, operators, ids);
     if (file !== previousFile) lines.push(`${" ".repeat(14)}file: ${file}`);
     previousFile = file;
     lines.push("");
@@ -148,7 +156,14 @@ function transcriptBlock(scenario: string, runs: readonly AgentRun[], ids: Reado
   return `${lines.join("\n")}\n`;
 }
 
-export async function startHarness(scenario: string): Promise<Harness> {
+export async function startHarness(scenario: string, options: HarnessOptions = {}): Promise<Harness> {
+  const keypers = options.keypers ?? 2;
+  assert.ok(Number.isInteger(keypers) && keypers >= 1 && keypers <= 26, `keypers must be 1 to 26, got ${keypers}`);
+  const operators: Room[] = Array.from({ length: keypers }, (_, index) => String.fromCharCode(97 + index));
+  const rooms: Room[] = ["team", ...operators];
+  const chatIds: Record<Room, number> = Object.fromEntries(rooms.map((room, index) => [room, -100800001 - index]));
+  const senderIds: Record<Room, number> = Object.fromEntries(rooms.map((room, index) => [room, 900001 + index]));
+  const instance = (room: Room): string => `kpr-${room}`;
   const suiteHost = requiredEnv("KEYPER_TESTS_DIR");
   const repoHost = dirname(suiteHost);
   const timeoutMs = Number(process.env.TURN_TIMEOUT_SECONDS ?? "600") * 1000;
@@ -254,7 +269,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
       const name = room === "team" ? "Test team" : `Operator ${room.toUpperCase()}`;
       await gateway.components.users.setAttributes(tx, user.id, room === "team"
         ? { kind: "teammate", name }
-        : { kind: "keyper", name, keypers: [{ instance: instances[room], set: "api" }], operators: [String(senderIds[room])] });
+        : { kind: "keyper", name, keypers: [{ instance: instance(room), set: "api" }], operators: [String(senderIds[room])] });
       await gateway.components.telegram.recordChat(tx, user.id, String(chatIds[room]));
       return user.id;
     });
@@ -283,6 +298,9 @@ export async function startHarness(scenario: string): Promise<Harness> {
 
   return {
     ids,
+    rooms,
+    operators,
+    instance,
     async writeWorkspace(path, text) {
       const target = join(directory, "workspace", path);
       await mkdir(dirname(target), { recursive: true });
@@ -323,6 +341,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
         from: room,
         text,
         sent,
+        recipients: rooms.filter((candidate) => sent.some((message) => message.to === candidate)),
         file: await readRoundFile(),
         to: (target) => sent.filter((message) => message.to === target).map((message) => message.text).join("\n"),
       };
@@ -350,7 +369,7 @@ export async function startHarness(scenario: string): Promise<Harness> {
     },
     async finish(failure) {
       const error = failure === undefined ? undefined : failure instanceof Error ? failure.message : String(failure);
-      await appendFile(transcriptPath, transcriptBlock(scenario, runs, ids, ranModel, error));
+      await appendFile(transcriptPath, transcriptBlock(scenario, runs, operators, ids, ranModel, error));
       await writeFile(join(directory, "report.json"), `${JSON.stringify({ scenario, passed: error === undefined, error, requested: model, ran: ranModel, ids, runs }, null, 2)}\n`);
       if (container !== undefined) await execute("docker", ["rm", "-f", container]).catch(() => undefined);
       await gateway.stop();
