@@ -18,7 +18,7 @@ import * as schema from "../schema.ts";
 import { startFakeBotApi } from "../telegram-channel/fake-bot-api.ts";
 import { createTelegramChannel } from "../telegram-channel/index.ts";
 import { applySchema, createTestDatabase } from "../telegram-channel/test-support.ts";
-import { promptData } from "../prompt.ts";
+import { failureMessage, promptData, template } from "../prompt.ts";
 
 const execute = promisify(execFile);
 
@@ -73,15 +73,6 @@ type Settings = { defaultProvider?: string; defaultModel?: string; defaultThinki
 type SignalRow = { state: string; error: string | null };
 type Logger = Record<"debug" | "info" | "warn" | "error", (...args: unknown[]) => void>;
 
-// Copied from main.ts; keep the templates identical.
-const template = `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
-
-{{text}}
-
-Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`;
-
-const failureMessage = "I could not process your last message. Please try again in a few minutes.";
-
 function requiredEnv(name: string): string {
   const value = process.env[name];
   assert.ok(value, `Missing environment variable ${name}. Use ./run.sh.`);
@@ -97,7 +88,7 @@ function fileLogger(path: string): Logger {
 
 async function writeTranscriptHeader(model: string): Promise<void> {
   try {
-    await writeFile(transcriptPath, `run ${runId}\n\n`, { flag: "wx" });
+    await writeFile(transcriptPath, `run ${runId}, requested ${model}\n\n`, { flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }

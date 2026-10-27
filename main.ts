@@ -17,7 +17,7 @@ import {
   templateHandler,
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
-import { describeCoverage, type KeyperRef, promptData } from "./prompt.ts";
+import { describeCoverage, failureMessage, type KeyperRef, promptData, template } from "./prompt.ts";
 import { teammateRoom } from "./report/rooms.ts";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
 
@@ -77,11 +77,7 @@ const gateway = createGateway({
   handlers: ({ db, messenger, telegram, users }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
-
-{{text}}
-
-Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`,
+        template,
         session: (signal) => `user_${signal.payload.userId}`,
         // Read the database here so prompt.ts can build prompt data without database access.
         data: async (signal) => {
@@ -94,13 +90,7 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
       // Send a failure message here so the sender receives an answer as well as a log entry.
       async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
         if (!outcome.failed) return;
-        await db.tx((tx) =>
-          messenger.send(
-            tx,
-            signal.payload.userId,
-            "I could not process your last message. Please try again in a few minutes.",
-          ),
-        );
+        await db.tx((tx) => messenger.send(tx, signal.payload.userId, failureMessage));
       },
     },
 
