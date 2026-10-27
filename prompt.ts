@@ -9,6 +9,14 @@
 import type { MessageRecord } from "@shutter-network/concorde/messenger";
 import type { TelegramSender } from "./telegram-channel/index.ts";
 
+export const template = `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
+
+{{text}}
+
+Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`;
+
+export const failureMessage = "I could not process your last message. Please try again in a few minutes.";
+
 // A keyper chat covers a set of keypers, and Telegram permissions allow only the operators who run
 // them to post. There may be several, and each answers for every keyper the chat covers.
 // A teammate chat is for teammates and covers none.

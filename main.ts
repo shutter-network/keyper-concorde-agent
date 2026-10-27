@@ -17,15 +17,14 @@ import {
   templateHandler,
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
-import { describeCoverage, type KeyperRef, promptData } from "./prompt.ts";
+import { describeCoverage, failureMessage, type KeyperRef, promptData, template } from "./prompt.ts";
 import { teammateRoom } from "./report/rooms.ts";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
 
 const tokenTtl = 30 * 24 * 60 * 60 * 1000;
 
-// Only what is named here reaches the agent container. Whichever provider keys are set in the
-// environment are forwarded, so switching provider is a change to .env and the two pi files,
-// not a rebuild.
+// Forward only configured provider keys. Provider changes use .env and Pi configuration;
+// they do not require rebuilding the image.
 const providerKeys = ["ANTHROPIC_API_KEY", "LOCAL_API_KEY"];
 const providerEnv = Object.fromEntries(
   providerKeys.filter((name) => process.env[name]).map((name) => [name, process.env[name]!]),
@@ -46,6 +45,8 @@ const runtime = createPiRuntime({
       { agentPath: "/workspace/AGENTS.md", path: "AGENTS.md", readOnly: true },
       { agentPath: "/home/agent/.pi/agent/settings.json", path: "settings.json", readOnly: true },
       { agentPath: "/home/agent/.pi/agent/models.json", path: "models.json", readOnly: true },
+      // Replaces pi's built-in system prompt. AGENTS.md is appended after it.
+      { agentPath: "/home/agent/.pi/agent/SYSTEM.md", path: "SYSTEM.md", readOnly: true },
     ],
   },
 });
@@ -59,7 +60,7 @@ const gateway = createGateway({
     const users = createUsers({ db, agentServer, publicServer });
     const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
     const messenger = createMessenger({ db, users, worker, agentServer });
-    // The one Channel. Telegram replaces the HTTP Channel, so the public message routes are gone.
+    // Telegram replaces the HTTP Channel; public HTTP message routes are not registered.
     // Accept group chats only. Reject private chats before storing a Message because they
     // have no assigned keyper.
     const telegram = createTelegramChannel({
@@ -76,11 +77,7 @@ const gateway = createGateway({
   handlers: ({ db, messenger, telegram, users }) => ({
     [messageReceivedKind]: {
       ...templateHandler<MessageRecord>({
-        template: `A message arrived from {{#if covers}}the group for {{covers}}{{else}}the teammates' group{{/if}}.{{#if role}} It was written by {{role}}.{{/if}} They said:
-
-{{text}}
-
-Answer them by sending a Message to user {{userId}}. Your final reply here reaches nobody.`,
+        template,
         session: (signal) => `user_${signal.payload.userId}`,
         // Read the database here so prompt.ts can build prompt data without database access.
         data: async (signal) => {
@@ -93,13 +90,7 @@ Answer them by sending a Message to user {{userId}}. Your final reply here reach
       // Send a failure message here so the sender receives an answer as well as a log entry.
       async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
         if (!outcome.failed) return;
-        await db.tx((tx) =>
-          messenger.send(
-            tx,
-            signal.payload.userId,
-            "I could not process your last message. Please try again in a few minutes.",
-          ),
-        );
+        await db.tx((tx) => messenger.send(tx, signal.payload.userId, failureMessage));
       },
     },
 
@@ -160,8 +151,7 @@ await gateway.components.scheduler.schedule({
 // the chat link and any keyper assignment together. This avoids creating Users that cannot
 // receive messages or keyper groups with no assigned keyper.
 //
-// Name a keyper group that covers nothing. Such a group raises UnboundGroupError on every message
-// it sends, so saying so at boot turns a silent runtime failure into one line in the log.
+// Log groups with no assigned Keypers at startup. Their messages fail with UnboundGroupError.
 const groups = await gateway.components.users.list();
 console.log(`gateway is up, serving ${groups.length} group${groups.length === 1 ? "" : "s"}`);
 for (const group of groups) {
