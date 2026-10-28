@@ -1,0 +1,58 @@
+name: keyper-behaviour
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: behaviour
+      POSTGRES_PASSWORD: behaviour
+      POSTGRES_DB: postgres
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U behaviour -d postgres]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    networks: [db]
+
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.behaviour
+      additional_contexts:
+        application: ..
+    environment:
+      DATABASE_URL: postgres://behaviour:behaviour@postgres:5432/postgres
+      # Agent mounts need this directory's path on the Docker host.
+      KEYPER_TESTS_DIR: ${PWD}
+      AGENT_IMAGE: keyper-behaviour-agent:local
+      TURN_TIMEOUT_SECONDS: ${TURN_TIMEOUT_SECONDS:-600}
+      KEYPERS: ${KEYPERS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LOCAL_API_KEY: ${LOCAL_API_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./results:/results
+      - ../AGENTS.md:/config/AGENTS.md:ro
+      - ../settings.json:/config/settings.json:ro
+    networks: [db, agent]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent-image:
+        condition: service_completed_successfully
+
+  agent-image:
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent
+    image: keyper-behaviour-agent:local
+    command: ["--version"]
+    networks: [agent]
+
+networks:
+  db:
+    internal: true
+  agent:
+    name: keyper_behaviour_agent
+

@@ -1,0 +1,3 @@
+# Build the weekly Keyper uptime report. The Scheduler in the gateway wakes the agent to read it
+# an hour later, at 14:00 UTC. BusyBox crond needs the trailing newline.
+0 13 * * 1 cd /app && node report/build.ts 2>&1
