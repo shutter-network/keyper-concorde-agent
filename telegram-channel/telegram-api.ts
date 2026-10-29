@@ -6,7 +6,13 @@ export type TelegramUpdate = {
     readonly message_id: number;
     readonly text?: string;
     readonly chat: { readonly id: number; readonly type: string };
-    readonly from?: { readonly id: number; readonly username?: string };
+    // Telegram requires first_name but makes username optional. Treat first_name as optional
+    // here too because the API response is cast to this type without runtime validation.
+    readonly from?: {
+      readonly id: number;
+      readonly username?: string;
+      readonly first_name?: string;
+    };
   };
 };
 
