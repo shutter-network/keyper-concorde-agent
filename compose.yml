@@ -73,6 +73,7 @@ services:
     volumes:
       - db:/var/lib/postgresql/data
     networks: [db]
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "concorde", "-d", "concorde"]
       interval: 3s
