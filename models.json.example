@@ -14,7 +14,8 @@
       ]
     },
     "anthropic": {
-      "baseUrl": "http://litellm:4000"
+      "baseUrl": "http://litellm:4000",
+      "apiKey": "not-a-real-key"
     }
   }
 }
