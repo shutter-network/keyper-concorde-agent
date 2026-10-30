@@ -5,20 +5,14 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { createGateway } from "@shutter-network/concorde/gateway";
-import { createMessenger, messageReceivedKind, type MessageRecord } from "@shutter-network/concorde/messenger";
-import { createPasswordAuth } from "@shutter-network/concorde/password-auth";
-import { createPiRuntime } from "@shutter-network/concorde/pi";
-import { templateHandler, type PostOutcome, type Runtime, type Signal } from "@shutter-network/concorde/signals";
+import type { Runtime } from "@shutter-network/concorde/signals";
 import { signals } from "@shutter-network/concorde/signals/schema";
-import { createUsers } from "@shutter-network/concorde/users";
+import { buildGateway, createAgentRuntime } from "../gateway.ts";
 import * as schema from "../schema.ts";
 import { startFakeBotApi } from "../telegram-channel/fake-bot-api.ts";
-import { createTelegramChannel } from "../telegram-channel/index.ts";
 import { applySchema, createTestDatabase } from "../telegram-channel/test-support.ts";
-import { failureMessage, promptData, template } from "../prompt.ts";
 
 const execute = promisify(execFile);
 
@@ -28,6 +22,18 @@ export type Room = string;
 export type HarnessOptions = {
   /** Operator rooms to create. Default 2. */
   readonly keypers?: number;
+  /**
+   * pi's settings, relative to the repository. Default: the deployment's settings.json.
+   * The runner reads it from /config under the same file name, so compose.behaviour.yml mounts it there.
+   */
+  readonly settings?: string;
+  /** pi's models.json, relative to the repository. Default: the deployment's models.json. */
+  readonly models?: string;
+};
+
+export type SendOptions = {
+  /** The Run must fail, rather than the scenario failing because it did. */
+  readonly expectFailure?: boolean;
 };
 
 export const runId = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
@@ -56,7 +62,7 @@ export type Harness = {
   /** The keyper instance an operator room covers. */
   instance(room: Room): string;
   /** Send a message and wait for the agent to finish. */
-  send(room: Room, text: string): Promise<AgentRun>;
+  send(room: Room, text: string, options?: SendOptions): Promise<AgentRun>;
   /** Restart the gateway. Workspace and sessions are kept. */
   restart(): Promise<void>;
   /** All messages sent to a room during this scenario. */
@@ -164,7 +170,9 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
   await mkdir(join(directory, "agent"), { recursive: true });
   const log = fileLogger(join(directory, "gateway.log"));
 
-  const settings = JSON.parse(await readFile("/config/settings.json", "utf8")) as Settings;
+  const settingsPath = options.settings ?? "settings.json";
+  const modelsPath = options.models ?? "models.json";
+  const settings = JSON.parse(await readFile(join("/config", basename(settingsPath)), "utf8")) as Settings;
   const model = `${settings.defaultProvider}/${settings.defaultModel}, thinking ${settings.defaultThinkingLevel ?? "default"}`;
   await writeTranscriptHeader(model);
 
@@ -174,9 +182,6 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
 
   // Track the container so it can be removed on timeout.
   const image = requiredEnv("AGENT_IMAGE");
-  const providerEnv = Object.fromEntries(
-    ["ANTHROPIC_API_KEY", "LOCAL_API_KEY"].filter((key) => process.env[key]).map((key) => [key, process.env[key]!]),
-  );
   let container: string | undefined;
   let containers = 0;
   const hostPath = (...parts: string[]) => join(...parts).slice(1); // relative to runtimeDir "/"
@@ -184,22 +189,21 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
     async run(prompt) {
       const name = `keyper-behaviour-${runId}-${scenario}-${++containers}`;
       container = name;
-      const pi = createPiRuntime({
+      // The production runtime, with this scenario's paths and a name to remove it by on timeout.
+      const pi = createAgentRuntime({
         image,
-        env: { ...providerEnv, AGENT_SERVER_URL: "http://runner:7411" },
-        networks: ["keyper_behaviour_agent"],
-        extraArgs: ["--name", name],
-        mounts: {
-          runtimeDir: "/",
-          entries: [
-            { agentPath: "/workspace", path: hostPath(hostDirectory, "workspace") },
-            { agentPath: "/home/agent/.pi/agent", path: hostPath(hostDirectory, "agent") },
-            { agentPath: "/workspace/AGENTS.md", path: hostPath(hostDirectory, "AGENTS.md"), readOnly: true },
-            { agentPath: "/home/agent/.pi/agent/settings.json", path: hostPath(repoHost, "settings.json"), readOnly: true },
-            { agentPath: "/home/agent/.pi/agent/models.json", path: hostPath(repoHost, "models.json"), readOnly: true },
-            { agentPath: "/home/agent/.pi/agent/SYSTEM.md", path: hostPath(repoHost, "SYSTEM.md"), readOnly: true },
-          ],
+        network: "keyper_behaviour_agent",
+        serverUrl: "http://runner:7411",
+        runtimeDir: "/",
+        paths: {
+          workspace: hostPath(hostDirectory, "workspace"),
+          state: hostPath(hostDirectory, "agent"),
+          agentsMd: hostPath(hostDirectory, "AGENTS.md"),
+          settings: hostPath(repoHost, settingsPath),
+          models: hostPath(repoHost, modelsPath),
+          systemMd: hostPath(repoHost, "SYSTEM.md"),
         },
+        extraArgs: ["--name", name],
       });
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -216,41 +220,16 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
     },
   };
 
-  const buildGateway = () =>
-    createGateway({
+  const newGateway = () =>
+    buildGateway({
       databaseUrl: database.url,
       runtime,
       logger: log,
       publicListen: { host: "127.0.0.1", port: 0 },
       agentListen: { host: "0.0.0.0", port: 7411 },
-      extend: ({ db, agentServer, publicServer, worker }) => {
-        const users = createUsers({ db, agentServer, publicServer });
-        const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl: 30 * 24 * 60 * 60 * 1000 });
-        const messenger = createMessenger({ db, users, worker, agentServer });
-        const telegram = createTelegramChannel({
-          db, messenger, token: "000000:TEST", apiBaseUrl: api.url, pollTimeoutSeconds: 1, retryDelayMs: 100, logger: log,
-          chatMode: "group",
-        });
-        return { users, passwordAuth, messenger, telegram };
-      },
-      handlers: ({ db, messenger, telegram, users }) => ({
-        [messageReceivedKind]: {
-          ...templateHandler<MessageRecord>({
-            template,
-            session: (signal) => `user_${signal.payload.userId}`,
-            data: async (signal) => {
-              const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
-              const user = await users.get(signal.payload.userId);
-              return promptData(signal.payload, sender, user?.attributes);
-            },
-          }),
-          async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
-            if (outcome.failed) await db.tx((tx) => messenger.send(tx, signal.payload.userId, failureMessage));
-          },
-        },
-      }),
+      telegram: { token: "000000:TEST", apiBaseUrl: api.url, pollTimeoutSeconds: 1, retryDelayMs: 100 },
     });
-  let gateway = buildGateway();
+  let gateway = newGateway();
 
   // Each scenario has its own users and team ID.
   const ids = {} as Record<Room, string>;
@@ -305,7 +284,7 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
         throw error;
       }
     },
-    async send(room, text) {
+    async send(room, text, sendOptions = {}) {
       const sentBefore = api.sent.length;
       const id = ++updateCount;
       api.push({
@@ -347,12 +326,16 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
         assert.ok(matches, `settings.json asks for ${expected} but the Run used ${ran}`);
       }
       const failed = rows.find((row) => row.state === "failed");
-      assert.ok(failed === undefined, `Agent run failed for ${room}: ${failed?.error}; input: ${JSON.stringify(text)}`);
+      if (sendOptions.expectFailure) {
+        assert.ok(failed !== undefined, `Agent run was expected to fail for ${room}; input: ${JSON.stringify(text)}`);
+      } else {
+        assert.ok(failed === undefined, `Agent run failed for ${room}: ${failed?.error}; input: ${JSON.stringify(text)}`);
+      }
       return run;
     },
     async restart() {
       await gateway.stop();
-      gateway = buildGateway();
+      gateway = newGateway();
       await gateway.start();
     },
     messagesTo(room) {

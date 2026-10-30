@@ -1,8 +1,0 @@
-{
-  "providers": {
-    "anthropic": {
-      "baseUrl": "http://litellm:4000",
-      "apiKey": "not-a-real-key"
-    }
-  }
-}

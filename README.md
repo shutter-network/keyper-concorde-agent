@@ -7,7 +7,8 @@ Built from `examples/00_minimal` of `shutter-network/concorde` at commit `e3f746
 
 - `telegram-channel/` implements the Messenger Channel interface using the Telegram Bot API.
   It replaces the HTTP Channel.
-- `main.ts` configures the Gateway, agent runtime and message handler. Register groups with
+- `gateway.ts` builds the Gateway, agent runtime and message handler; `main.ts` starts it with the
+  deployment's settings. The behaviour tests build the same Gateway. Register groups with
   `admin.ts`; startup does not create users or attach chats.
 - `settings.json` selects the provider and model; `models.json` configures custom endpoints.
   Copy the `.example` files for each deployment. Do not commit the local configuration.
@@ -259,7 +260,8 @@ workspace and sessions, and incur model API costs.
 
 | file | role |
 |---|---|
-| `main.ts` | Gateway components, agent runtime and message handler |
+| `gateway.ts` | Gateway components, agent runtime and message handler, shared with the behaviour tests |
+| `main.ts` | starts the Gateway with the deployment's settings and registers the weekly Schedule |
 | `admin.ts` | Group registration, Keyper assignments and operator IDs |
 | `prompt.ts` | Validates group attributes and builds message context for the agent |
 | `telegram-channel/` | the Telegram Channel: schema, chats, outbox, Bot API, channel |

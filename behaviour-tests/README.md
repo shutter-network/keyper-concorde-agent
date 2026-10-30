@@ -10,13 +10,18 @@ Use this directory in the application checkout. The runner builds from the repos
 source files and Concorde tarball in `vendor/`. Agent containers mount the repository's
 `AGENTS.md`, `SYSTEM.md`, `settings.json` and `models.json`.
 
+The agent reaches its model through a `litellm` service, as in production. `models.json` must be
+the proxy version copied from `models.json.example`. An older `models.json` that calls the
+provider directly fails every run, because the agent container has no API key.
+
 Requires Docker Compose 2.17 or newer.
 
 ## Run
 
-Run from this directory. `run.sh` loads the repository's `.env` through Docker Compose.
-It forwards `ANTHROPIC_API_KEY` and `LOCAL_API_KEY` when set. Exported shell variables
-override values in `.env`.
+Run from this directory. `run.sh` loads the repository's `.env` through Docker Compose and gives
+`ANTHROPIC_API_KEY`, `LOCAL_API_BASE` and `LOCAL_API_KEY` to the `litellm` service only. The
+runner and the agent containers get no API key. A local model needs both `LOCAL_API_BASE` and
+`LOCAL_API_KEY`. Exported shell variables override values in `.env`.
 
 Run one scenario:
 
@@ -71,25 +76,31 @@ Review `report.json` before treating a pass as evidence that the conversation wa
 Concurrent rounds, unrelated status questions during a round, and cost measurements are not
 automated here. The silent-operator test checks one run, not an extended waiting period.
 
-`harness.mts` creates a test Gateway, injects Telegram messages, waits for each run to finish,
-and records replies and state. It duplicates the handler setup from `main.ts`; keep both in sync.
+`harness.mts` builds the Gateway with `buildGateway` and `createAgentRuntime` from `gateway.ts`,
+the same code `main.ts` uses, with a test database, a fake Telegram API and per-scenario paths.
+It injects Telegram messages, waits for each run to finish, and records replies and state.
 It copies `AGENTS.md` unchanged.
 
 ## LiteLLM proxy test
 
-`proxy.test.mts` checks the LiteLLM proxy with a fake Anthropic API and a dummy key. It does not
-read `.env` and makes no model API calls. It uses the deployment's LiteLLM image and
-`litellm-config.yaml`, and the pi configuration in `proxy/`.
+`proxy.test.mts` checks the LiteLLM proxy through the harness, with a fake Anthropic API
+(`fake-anthropic.mts`) in the runner. It does not read `.env` and makes no model API calls.
 
 ```sh
-./run-proxy.sh
+./run.sh proxy
 ```
 
-- A message gets a reply through LiteLLM: the fake model makes the agent post `proxy-ok` to the chat.
-- Every request reaching the fake model carries a dummy key, and the agent container's environment.
-- A model error makes the Run fail, and the chat receives the failure message.
+`run.sh` gives `litellm` a dummy key and points it at the fake. The scenarios use
+`proxy-settings.json` (a `claude-*` model) and the committed `models.json.example`.
 
-The test copies the agent runtime and failure handler from `main.ts` and the credential check guards. Keep both in sync.
+- `proxy-reply`: the fake model makes the agent post `proxy-ok` to the chat. Every request reaching
+  the fake carries the dummy key. The agent container's environment, printed by the same tool call,
+  does not contain it. The runner holds the dummy key, so the check fails if `gateway.ts` forwards
+  provider keys to the agent again.
+- `proxy-failure`: a model error makes the run fail, and the chat receives the failure message.
+
+`./run.sh all` does not include these scenarios. Before each run, `run.sh` restarts `litellm` so it
+does not keep the keys from a previous mode.
 
 ## Results
 

@@ -15,6 +15,27 @@ services:
       retries: 20
     networks: [db]
 
+  # The deployment's image and config, holding the provider keys as production does. run.sh sets
+  # them: the real keys from .env, or for `./run.sh proxy` a dummy key and the fake Anthropic API in
+  # the runner.
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.103.1
+    command: [--config, /app/config.yaml, --port, "4000", --telemetry, "False"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_API_BASE: ${ANTHROPIC_API_BASE:-}
+      LOCAL_API_BASE: ${LOCAL_API_BASE:-}
+      LOCAL_API_KEY: ${LOCAL_API_KEY:-}
+    volumes:
+      - ../litellm-config.yaml:/app/config.yaml:ro
+    networks: [agent]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
   runner:
     build:
       context: .
@@ -28,16 +49,21 @@ services:
       AGENT_IMAGE: keyper-behaviour-agent:local
       TURN_TIMEOUT_SECONDS: ${TURN_TIMEOUT_SECONDS:-600}
       KEYPERS: ${KEYPERS:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      LOCAL_API_KEY: ${LOCAL_API_KEY:-}
+      # Empty, like the production gateway. `./run.sh proxy` sets a dummy key here so the proxy
+      # test would see it if the agent runtime forwarded it again.
+      ANTHROPIC_API_KEY: ${RUNNER_PROVIDER_KEY:-}
+      LOCAL_API_KEY: ${RUNNER_PROVIDER_KEY:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./results:/results
       - ../AGENTS.md:/config/AGENTS.md:ro
       - ../settings.json:/config/settings.json:ro
+      - ./proxy-settings.json:/config/proxy-settings.json:ro
     networks: [db, agent]
     depends_on:
       postgres:
+        condition: service_healthy
+      litellm:
         condition: service_healthy
       agent-image:
         condition: service_completed_successfully
