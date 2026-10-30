@@ -24,17 +24,12 @@ import { createTelegramChannel } from "./telegram-channel/index.ts";
 
 const tokenTtl = 30 * 24 * 60 * 60 * 1000;
 
-// Forward only configured provider keys. Provider changes use .env and Pi configuration;
-// they do not require rebuilding the image.
-const providerKeys = ["ANTHROPIC_API_KEY", "LOCAL_API_KEY"];
-const providerEnv = Object.fromEntries(
-  providerKeys.filter((name) => process.env[name]).map((name) => [name, process.env[name]!]),
-);
-
+// Only what is named here reaches the agent container, and no model credential is named: the
+// litellm service holds those and adds the header on the way out, so an agent that reads its own
+// environment finds nothing worth having. `models.json` is what points pi at the proxy.
 const runtime = createPiRuntime({
   image: process.env.AGENT_IMAGE!,
   env: {
-    ...providerEnv,
     AGENT_SERVER_URL: process.env.AGENT_SERVER_URL!,
   },
   networks: [process.env.AGENT_NETWORK!],

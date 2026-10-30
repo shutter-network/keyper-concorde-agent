@@ -1,2 +1,5 @@
 results/
 
+# The proxy test's pi configuration. It holds no secrets.
+!proxy/settings.json
+!proxy/models.json

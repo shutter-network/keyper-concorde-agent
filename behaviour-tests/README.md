@@ -75,6 +75,22 @@ automated here. The silent-operator test checks one run, not an extended waiting
 and records replies and state. It duplicates the handler setup from `main.ts`; keep both in sync.
 It copies `AGENTS.md` unchanged.
 
+## LiteLLM proxy test
+
+`proxy.test.mts` checks the LiteLLM proxy with a fake Anthropic API and a dummy key. It does not
+read `.env` and makes no model API calls. It uses the deployment's LiteLLM image and
+`litellm-config.yaml`, and the pi configuration in `proxy/`.
+
+```sh
+./run-proxy.sh
+```
+
+- A message gets a reply through LiteLLM: the fake model makes the agent post `proxy-ok` to the chat.
+- Every request reaching the fake model carries a dummy key, and the agent container's environment.
+- A model error makes the Run fail, and the chat receives the failure message.
+
+The test copies the agent runtime and failure handler from `main.ts` and the credential check guards. Keep both in sync.
+
 ## Results
 
 `results/<run>/transcript.txt` shows pass/fail results and shortened messages.
