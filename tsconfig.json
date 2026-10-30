@@ -15,5 +15,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["main.ts", "admin.ts", "drizzle.config.ts", "schema.ts", "telegram-channel/**/*.ts"]
+  "include": ["main.ts", "admin.ts", "drizzle.config.ts", "schema.ts", "telegram-channel/**/*.ts", "report/**/*.ts"]
 }

@@ -2,8 +2,9 @@
 //
 // Inbound: one long poll on getUpdates. A text from a chat some User holds becomes that User's
 // Message, inside one transaction with the update id, so a redelivery is dropped. A text from a
-// chat nobody holds is answered once with its own chat id, outside the log, which is how an
-// operator learns the id to hand the team.
+// chat with no registration gets a reply with the chat ID and sender ID needed to register it.
+// This reply is not stored in the message log. Chats excluded by `chatMode` get a rejection
+// without either ID. Send one reply for each rejected incoming message.
 //
 // Outbound: `send` writes an outbox row inside the Messenger's transaction and rings a NOTIFY.
 // The drain then calls sendMessage after the commit, deletes the row on success, keeps it with a
@@ -27,9 +28,17 @@ import {
   UnrecordedChatError,
 } from "./outbound.ts";
 import { received, telegramChannelTables } from "./schema/index.ts";
+import { insertSender, selectSenderFor, type TelegramSender } from "./senders.ts";
 import { createTelegramApi, TelegramApiError, type TelegramUpdate } from "./telegram-api.ts";
 
 const channelName = "telegram";
+
+export type TelegramChatMode = "private" | "group" | "both";
+
+function serves(mode: TelegramChatMode, chatType: string): boolean {
+  if (mode === "both") return true;
+  return mode === "private" ? chatType === "private" : chatType !== "private";
+}
 
 export type TelegramChannelOptions = {
   readonly db: Db;
@@ -41,6 +50,8 @@ export type TelegramChannelOptions = {
   readonly pollTimeoutSeconds?: number;
   /** Pause after a failed poll before the next one. Default 5000. */
   readonly retryDelayMs?: number;
+  /** Accepted chat types. Defaults to "both", which accepts all chat types. */
+  readonly chatMode?: TelegramChatMode;
   /** For tests against a fake Bot API. */
   readonly apiBaseUrl?: string;
 };
@@ -59,6 +70,12 @@ export type TelegramChannel = Channel & {
     userId: string,
   ): Promise<string | undefined>;
 
+  /** Return Telegram sender details, chat details and message ID, or undefined if not recorded. */
+  senderOf<TSchema extends Record<string, unknown>>(
+    tx: Handle<TSchema>,
+    messageId: string,
+  ): Promise<TelegramSender | undefined>;
+
   /** Push whatever is queued to Telegram now. Tests call it; a deployment does not need to. */
   drain(): Promise<void>;
 };
@@ -69,12 +86,22 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
   const api = createTelegramApi(options.token, options.apiBaseUrl);
   const pollTimeout = options.pollTimeoutSeconds ?? 25;
   const retryDelay = options.retryDelayMs ?? 5000;
+  const chatMode = options.chatMode ?? "both";
 
   let running: AbortController | undefined;
   let polling: Promise<void> = Promise.resolve();
   let listening: Listening | undefined;
   let draining: Promise<void> = Promise.resolve();
   let ticker: ReturnType<typeof setInterval> | undefined;
+  // Reply directly to a rejected chat without creating a Message or outbox row.
+  // Send a reply for each incoming message because rejected chats are not remembered.
+  async function tell(chatId: string, text: string, signal: AbortSignal): Promise<void> {
+    try {
+      await api.sendMessage(chatId, text, signal);
+    } catch (error) {
+      if (!signal.aborted) log.warn({ err: error, chatId }, "a reply outside the log failed");
+    }
+  }
 
   async function admit(update: TelegramUpdate, signal: AbortSignal): Promise<void> {
     const message = update.message;
@@ -83,21 +110,28 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
     if (message === undefined || text === undefined) return;
 
     const chatId = String(message.chat.id);
+    const chatType = message.chat.type;
+    // Check the chat type before looking up its registration. Unsupported chat types should
+    // not receive registration IDs or an invitation to register.
+    if (!serves(chatMode, chatType)) {
+      log.info(
+        { chatId, chatType, update: update.update_id },
+        "a Telegram message came from a kind of chat this deployment does not serve, and was dropped",
+      );
+      await tell(chatId, refusal(chatMode), signal);
+      return;
+    }
+
     const userId = await selectUserFor(handle, chatId);
     if (userId === undefined) {
       log.info(
         { chatId, update: update.update_id },
         "a Telegram message came from a chat no User holds, and was dropped",
       );
-      try {
-        await api.sendMessage(
-          chatId,
-          `This chat is not registered with the agent. Its id is ${chatId}.`,
-          signal,
-        );
-      } catch (error) {
-        if (!signal.aborted) log.warn({ err: error, chatId }, "the reply to an unknown chat failed");
-      }
+      // Include the chat ID for registering the group and the sender ID for registering its
+      // operator. This reply provides those IDs when the chat has no stored records yet.
+      const who = message.from === undefined ? "" : ` You are ${message.from.id}.`;
+      await tell(chatId, `This chat is not registered with the agent. Its id is ${chatId}.${who}`, signal);
       return;
     }
 
@@ -108,7 +142,16 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
         .onConflictDoNothing()
         .returning({ updateId: received.updateId });
       if (claimed === undefined) return false;
-      await inbound.receive(tx, userId, text);
+      const record = await inbound.receive(tx, userId, text);
+      // Save the Message and its Telegram sender details in the same transaction.
+      await insertSender(tx, record.id, {
+        senderId: message.from === undefined ? null : String(message.from.id),
+        username: message.from?.username ?? null,
+        firstName: message.from?.first_name ?? null,
+        chatId,
+        chatType,
+        telegramMessageId: String(message.message_id),
+      });
       return true;
     });
     if (stored) log.info({ update: update.update_id, userId }, "a Telegram message became a Message");
@@ -120,8 +163,10 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
       try {
         const updates = await api.getUpdates(offset, pollTimeout, signal);
         for (const update of updates) {
-          offset = update.update_id + 1;
+          // Advance only after the update is stored. Advancing first would drop an update whose
+          // admit threw, because Telegram never offers it again.
           await admit(update, signal);
+          offset = update.update_id + 1;
         }
       } catch (error) {
         if (signal.aborted) return;
@@ -198,6 +243,7 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
     name: channelName,
     recordChat: (tx, userId, chatId) => insertChat(tx, userId, chatId),
     chatOf: (tx, userId) => selectChatFor(tx, userId),
+    senderOf: (tx, messageId) => selectSenderFor(tx, messageId),
     send: async (tx, message: MessageRecord) => {
       const chatId = await selectChatFor(tx, message.userId);
       if (chatId === undefined) throw new UnrecordedChatError(message.userId);
@@ -247,6 +293,12 @@ export function createTelegramChannel(options: TelegramChannelOptions): Telegram
 
   const inbound = options.messenger.register(channel);
   return channel;
+}
+
+function refusal(mode: TelegramChatMode): string {
+  return mode === "private"
+    ? "This agent answers in direct messages only, and not in group chats."
+    : "This agent answers in group chats only, and not in direct messages.";
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
