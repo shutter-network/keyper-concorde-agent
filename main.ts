@@ -17,6 +17,7 @@ import {
   templateHandler,
 } from "@shutter-network/concorde/signals";
 import { createUsers } from "@shutter-network/concorde/users";
+import { sql } from "drizzle-orm";
 import { describeCoverage, failureMessage, type KeyperRef, promptData, template } from "./prompt.ts";
 import { teammateRoom } from "./report/rooms.ts";
 import { createTelegramChannel } from "./telegram-channel/index.ts";
@@ -72,6 +73,25 @@ const gateway = createGateway({
     // Wakes the agent on a timetable. `agentServer` is deliberately not passed, so no schedule
     // routes are registered and the agent cannot create or cancel a Schedule.
     const scheduler = createScheduler({ db, worker });
+
+    publicServer.fastify.get("/health", async (_request, reply) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          db.handle({}).execute(sql`select 1`),
+          new Promise((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error("database check timed out")), 3000);
+          }),
+        ]);
+        return { status: "ok" };
+      } catch (error) {
+        reply.code(503);
+        return { status: "unhealthy", detail: String(error) };
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    });
+
     return { users, passwordAuth, messenger, telegram, scheduler };
   },
   handlers: ({ db, messenger, telegram, users }) => ({
