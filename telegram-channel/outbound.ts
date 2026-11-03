@@ -41,6 +41,14 @@ export async function selectUnsent(handle: TelegramHandle): Promise<OutboxRow[]>
     .orderBy(asc(outbox.queuedAt), asc(outbox.messageId));
 }
 
+export async function setSentParts(
+  handle: TelegramHandle,
+  messageId: string,
+  sentParts: number,
+): Promise<void> {
+  await handle.update(outbox).set({ sentParts }).where(eq(outbox.messageId, messageId));
+}
+
 export async function deleteSent(handle: TelegramHandle, messageId: string): Promise<void> {
   await handle.delete(outbox).where(eq(outbox.messageId, messageId));
 }
