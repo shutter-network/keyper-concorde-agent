@@ -23,6 +23,7 @@ services:
     command: [--config, /app/config.yaml, --port, "4000", --telemetry, "False"]
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
       ANTHROPIC_API_BASE: ${ANTHROPIC_API_BASE:-}
       LOCAL_API_BASE: ${LOCAL_API_BASE:-}
       LOCAL_API_KEY: ${LOCAL_API_KEY:-}

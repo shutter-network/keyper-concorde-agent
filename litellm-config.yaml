@@ -9,6 +9,8 @@ model_list:
     litellm_params:
       model: anthropic/claude-*
       api_key: os.environ/ANTHROPIC_API_KEY
+      extra_headers:
+        anthropic-workspace-id: os.environ/ANTHROPIC_WORKSPACE_ID
 
   # Everything else, which is whatever `switch-model.sh` last wrote into `models.json`. The id is
   # forwarded upstream unchanged, so switching models stays a change to two files and never to

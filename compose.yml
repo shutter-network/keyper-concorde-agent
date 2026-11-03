@@ -64,6 +64,7 @@ services:
       LOCAL_API_BASE: ${LOCAL_API_BASE:-}
       LOCAL_API_KEY: ${LOCAL_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
     volumes:
       - ./litellm-config.yaml:/app/config.yaml:ro
     networks: [agent]
