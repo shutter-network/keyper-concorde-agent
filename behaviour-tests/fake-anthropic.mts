@@ -1,6 +1,5 @@
-// A stand-in for api.anthropic.com on runner:8090, which `./run.sh proxy` points LiteLLM at.
-// It records every request, and answers either as a scripted model that posts one reply through
-// the agent's bash tool, or with an error that is not retried.
+// Fake Anthropic API at runner:8090, used by ./run.sh proxy.
+// Records requests and returns either a scripted tool call and final response, or HTTP 400.
 
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -19,7 +18,7 @@ export type Upstream = { headers: IncomingMessage["headers"]; body: AnthropicReq
 export type FakeAnthropic = {
   /** Every request received, in order. */
   readonly requests: Upstream[];
-  /** Answer as a model that posts `replyText` to this user, prints its env, and then ends its turn. */
+  /** Return a tool call that prints the agent's environment and sends replyText, then a final response. */
   reply(userId: string): void;
   /** Answer every request with HTTP 400 `invalid_request_error`. */
   fail(): void;
@@ -28,7 +27,7 @@ export type FakeAnthropic = {
 
 type Block = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown };
 
-/** The tool result in the request's last message, as JSON text, or undefined if it has none. */
+/** Extract the tool result from the last message as JSON text, if present. */
 export function toolResultOf(request: AnthropicRequest): string | undefined {
   const last = request.messages.at(-1);
   if (!last || typeof last.content === "string") return undefined;

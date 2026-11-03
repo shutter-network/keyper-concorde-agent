@@ -1,6 +1,5 @@
-// The Gateway as production runs it, built but not started. main.ts starts it with the
-// deployment's environment; the behaviour tests build the same one against a test database, a
-// fake Telegram API and their own paths. Importing this file starts nothing.
+// Shared gateway and agent setup for production and tests.
+// Callers provide configuration and start the gateway explicitly.
 
 import type { Logger } from "@shutter-network/concorde/logging";
 import { createGateway } from "@shutter-network/concorde/gateway";
@@ -33,13 +32,13 @@ const tokenTtl = 30 * 24 * 60 * 60 * 1000;
 export type AgentOptions = {
   readonly image: string;
   readonly network: string;
-  /** The Gateway's agent server, as the agent container reaches it. */
+  /** Agent server URL reachable from the agent container. */
   readonly serverUrl: string;
-  /** The host directory the paths below are relative to. */
+  /** Host directory used to resolve the paths below. */
   readonly runtimeDir: string;
   readonly paths: {
     readonly workspace: string;
-    /** pi's own directory: sessions and the files it keeps between Runs. */
+    /** Persistent Pi state, including sessions. */
     readonly state: string;
     readonly agentsMd: string;
     readonly settings: string;
@@ -51,16 +50,13 @@ export type AgentOptions = {
 };
 
 /**
- * One agent container per Run. Its environment is fixed here and takes no option, so production
- * and the tests give the agent the same thing.
+ * Create one agent container per run, using the same environment configuration in production and tests.
  */
 export function createAgentRuntime(agent: AgentOptions): Runtime {
   const { paths } = agent;
   return createPiRuntime({
     image: agent.image,
-    // Only what is named here reaches the agent container, and no model credential is named: the
-    // litellm service holds those and adds the header on the way out, so an agent that reads its
-    // own environment finds nothing worth having. `models.json` is what points pi at the proxy.
+    // Provider keys stay in LiteLLM. models.json points Pi at the proxy.
     env: {
       AGENT_SERVER_URL: agent.serverUrl,
     },
@@ -109,9 +105,7 @@ export function buildGateway(options: GatewayOptions) {
       const users = createUsers({ db, agentServer, publicServer });
       const passwordAuth = createPasswordAuth({ db, users, publicServer, tokenTtl });
       const messenger = createMessenger({ db, users, worker, agentServer });
-      // Telegram replaces the HTTP Channel; public HTTP message routes are not registered.
-      // Accept group chats only. Reject private chats before storing a Message because they
-      // have no assigned keyper.
+      // Use Telegram for messaging and reject private chats before storing messages.
       const telegram = createTelegramChannel({
         db,
         messenger,
@@ -119,8 +113,7 @@ export function buildGateway(options: GatewayOptions) {
         ...logger,
         chatMode: "group",
       });
-      // Wakes the agent on a timetable. `agentServer` is deliberately not passed, so no schedule
-      // routes are registered and the agent cannot create or cancel a Schedule.
+      // Omitting agentServer prevents the agent from creating or cancelling schedules through the API.
       const scheduler = createScheduler({ db, worker });
 
       publicServer.fastify.get("/health", async (_request, reply) => {
@@ -148,23 +141,21 @@ export function buildGateway(options: GatewayOptions) {
         ...templateHandler<MessageRecord>({
           template,
           session: (signal) => `user_${signal.payload.userId}`,
-          // Read the database here so prompt.ts can build prompt data without database access.
+          // Load records here to keep prompt.ts independent of the database.
           data: async (signal) => {
             const sender = await db.tx((tx) => telegram.senderOf(tx, signal.payload.id));
             const user = await users.get(signal.payload.userId);
             return promptData(signal.payload, sender, user?.attributes);
           },
         }),
-        // The template handler does not notify users when a Run fails.
-        // Send a failure message here so the sender receives an answer as well as a log entry.
+        // Notify the sender when a run fails.
         async post(signal: Signal<MessageRecord>, outcome: PostOutcome) {
           if (!outcome.failed) return;
           await db.tx((tx) => messenger.send(tx, signal.payload.userId, failureMessage));
         },
       },
 
-      // Fired by the weekly Schedule main.ts registers. The report itself is built an hour earlier
-      // by the report-cron service, so this only tells the agent that today's file is there to read.
+      // Handle the weekly schedule from main.ts. report-cron generates the report an hour earlier.
       [scheduleFiredKind]: {
         async handle(signal: Signal<ScheduleFiredRecord>) {
           const { data, firedAt } = signal.payload;
@@ -189,8 +180,7 @@ export function buildGateway(options: GatewayOptions) {
             },
           ];
         },
-        // A failed Run is otherwise one log line, and the team would wait for a report that never
-        // arrives without knowing one was due.
+        // Notify the team if the scheduled agent run fails.
         async post(signal: Signal<ScheduleFiredRecord>, outcome: PostOutcome) {
           if (!outcome.failed) return;
           const team = await teammateRoom(users);

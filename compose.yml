@@ -8,8 +8,7 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      # No model credential here. The litellm service holds those.
-      # The Telegram Channel's bot, and the tester's chat, attached to the seeded user at boot.
+      # The gateway receives the Telegram token. Model API keys go to LiteLLM.
       TG_TOKEN: ${TG_TOKEN:?copy .env.example to .env and put the bot token in it}
       DATABASE_URL: *database-url
       PUBLIC_HOST: 0.0.0.0
@@ -49,8 +48,8 @@ services:
       retries: 3
       start_period: 20s
 
-  # The only service holding a model credential. Every agent container reaches it by name on the
-  # agent network and sends a placeholder key, which LiteLLM replaces on the way out.
+  # Agent containers connect to this service on the agent network.
+  # LiteLLM adds the provider credentials to upstream requests.
   litellm:
     image: ghcr.io/berriai/litellm:v1.103.1
     command:
@@ -75,7 +74,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 120s
- 
+
   # Builds the weekly report and writes it to the shared workspace. It never touches the agent or
   # the gateway.
   #

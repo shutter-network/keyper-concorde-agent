@@ -1,8 +1,8 @@
 # Keyper behaviour tests
 
 Coordination and weekly-report tests using Concorde, the configured model and a simulated Telegram API.
-Each input message starts one agent run. Tests do not contact real Telegram groups, but
-they make model API calls and incur costs.
+Each input message starts one agent run. Coordination and report scenarios make paid model
+API calls. The proxy test uses a fake model API. No tests contact real Telegram groups.
 
 ## Setup
 
@@ -10,18 +10,17 @@ Use this directory in the application checkout. The runner builds from the repos
 source files and Concorde tarball in `vendor/`. Agent containers mount the repository's
 `AGENTS.md`, `SYSTEM.md`, `settings.json` and `models.json`.
 
-The agent reaches its model through a `litellm` service, as in production. `models.json` must be
-the proxy version copied from `models.json.example`. An older `models.json` that calls the
-provider directly fails every run, because the agent container has no API key.
+The tests use LiteLLM, as production does. Update `models.json` using `models.json.example`
+so Pi connects to the test proxy. Provider keys are no longer passed to agent containers.
 
 Requires Docker Compose 2.17 or newer.
 
 ## Run
 
-Run from this directory. `run.sh` loads the repository's `.env` through Docker Compose and gives
-`ANTHROPIC_API_KEY`, `LOCAL_API_BASE` and `LOCAL_API_KEY` to the `litellm` service only. The
-runner and the agent containers get no API key. A local model needs both `LOCAL_API_BASE` and
-`LOCAL_API_KEY`. Exported shell variables override values in `.env`.
+Run from this directory. For behaviour scenarios, `run.sh` loads the repository's `.env`
+through Docker Compose. Provider keys and `LOCAL_API_BASE` are passed only to LiteLLM.
+Set `ANTHROPIC_WORKSPACE_ID` if the Anthropic key has no workspace scope. Local models need
+both `LOCAL_API_BASE` and `LOCAL_API_KEY`. Exported shell variables override `.env` values.
 
 Run one scenario:
 
@@ -29,7 +28,7 @@ Run one scenario:
 ./run.sh scheduling
 ```
 
-Run all scenarios:
+Run all behaviour scenarios:
 
 ```sh
 ./run.sh all
@@ -76,31 +75,29 @@ Review `report.json` before treating a pass as evidence that the conversation wa
 Concurrent rounds, unrelated status questions during a round, and cost measurements are not
 automated here. The silent-operator test checks one run, not an extended waiting period.
 
-`harness.mts` builds the Gateway with `buildGateway` and `createAgentRuntime` from `gateway.ts`,
-the same code `main.ts` uses, with a test database, a fake Telegram API and per-scenario paths.
-It injects Telegram messages, waits for each run to finish, and records replies and state.
-It copies `AGENTS.md` unchanged.
+`harness.mts` uses the same gateway and runtime functions as `main.ts`, with a test database,
+fake Telegram API and separate state for each scenario. It supplies incoming messages and
+records replies and state after each run. The tests copy `AGENTS.md` unchanged.
 
 ## LiteLLM proxy test
 
-`proxy.test.mts` checks the LiteLLM proxy through the harness, with a fake Anthropic API
-(`fake-anthropic.mts`) in the runner. It does not read `.env` and makes no model API calls.
+`proxy.test.mts` uses the shared harness and a fake Anthropic API (`fake-anthropic.mts`).
+It requires no real provider credentials and makes no paid model calls.
 
 ```sh
 ./run.sh proxy
 ```
 
-`run.sh` gives `litellm` a dummy key and points it at the fake. The scenarios use
-`proxy-settings.json` (a `claude-*` model) and the committed `models.json.example`.
+`run.sh` configures LiteLLM to use a dummy key and the fake API in the runner. These tests use
+`proxy-settings.json` and the committed `models.json.example`.
 
-- `proxy-reply`: the fake model makes the agent post `proxy-ok` to the chat. Every request reaching
-  the fake carries the dummy key. The agent container's environment, printed by the same tool call,
-  does not contain it. The runner holds the dummy key, so the check fails if `gateway.ts` forwards
-  provider keys to the agent again.
-- `proxy-failure`: a model error makes the run fail, and the chat receives the failure message.
+- `proxy-reply`: checks that a scripted tool call sends `proxy-ok` to the chat, upstream requests
+  carry the dummy key, and the agent container's environment does not contain it. The runner
+  has dummy provider keys so the test detects accidental key forwarding in `gateway.ts`.
+- `proxy-failure`: checks that an upstream error fails the run and notifies the originating chat.
 
-`./run.sh all` does not include these scenarios. Before each run, `run.sh` restarts `litellm` so it
-does not keep the keys from a previous mode.
+Run proxy tests separately from `./run.sh all`. The script recreates LiteLLM before each
+invocation to apply the credentials and endpoint for the selected test mode.
 
 ## Results
 

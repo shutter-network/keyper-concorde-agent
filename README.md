@@ -7,13 +7,13 @@ Built from `examples/00_minimal` of `shutter-network/concorde` at commit `e3f746
 
 - `telegram-channel/` implements the Messenger Channel interface using the Telegram Bot API.
   It replaces the HTTP Channel.
-- `gateway.ts` builds the Gateway, agent runtime and message handler; `main.ts` starts it with the
-  deployment's settings. The behaviour tests build the same Gateway. Register groups with
+- `gateway.ts` defines the Gateway and agent runtime used by production and tests.
+  `main.ts` starts the deployment and registers its weekly schedule. Register groups with
   `admin.ts`; startup does not create users or attach chats.
 - `settings.json` selects the provider and model; `models.json` configures custom endpoints.
   Copy the `.example` files for each deployment. Do not commit the local configuration.
-- the `litellm` service stores the model API keys and adds them to requests sent to providers.
-  The agent has no model API keys. See [The model proxy](#the-model-proxy).
+- `litellm` sends model requests to the configured provider and supplies its API key.
+  See [The model proxy](#the-model-proxy).
 - `AGENTS.md` defines coordination, announcement and Grafana status duties.
 - `SYSTEM.md` replaces Pi's built-in system prompt. Pi appends the project instructions.
 
@@ -31,41 +31,40 @@ Switching to a published package will require updating the dependency and Docker
 
 ## The model proxy
 
-The `litellm` service stores the model API keys and adds the correct key to each request it
-sends to a provider. Neither the agent nor the gateway receives these keys. The agent cannot
-find any model API keys by reading its environment.
+Pi sends model requests through LiteLLM. Docker Compose passes model API keys only to the
+`litellm` service, which adds them to upstream requests. The gateway and agent environments
+do not receive these keys.
 
-Three files configure the proxy and its connection to pi:
+The proxy uses these configuration files:
 
 | file | role | in git? |
 |---|---|---|
-| `litellm-config.yaml` | sends requests for any `claude-*` model to Anthropic and all other models to `LOCAL_API_BASE` | yes |
-| `models.json` | tells pi to send requests to the proxy instead of directly to the provider | no, each machine has its own copy |
-| `.env` | stores the real model API keys and the local endpoint, which only the proxy reads | no, each machine has its own copy |
+| `litellm-config.yaml` | Routes `claude-*` models to Anthropic and other models to `LOCAL_API_BASE` | yes |
+| `models.json` | Configures Pi to use the proxy | no |
+| `.env` | Supplies provider credentials, endpoint and workspace ID to LiteLLM; also holds the gateway's Telegram token | no |
 
 ### Updating the configuration and switching models
 
-**Replace the old `models.json` on every machine, including the droplet.** Copy the new
-`models.json.example` to `models.json`. If you keep the old endpoint and a real API key in
-`models.json`, requests still work, but the agent still has the key. There is no warning.
+Update `models.json` on each deployment using `models.json.example`, keeping your model IDs.
+Use the proxy URLs and placeholder keys from the example. A real key in `models.json` remains
+readable by the agent, and a direct provider URL bypasses LiteLLM.
 
-**`switch-model.sh` does not check which provider a model ID belongs to.** It changes only the
-model ID in `settings.json` and `models.json`; it does not change other settings in those files.
-The proxy sends requests for any `claude-*` ID to Anthropic and all other IDs to `LOCAL_API_BASE`.
-You can safely switch between two Claude models or between two local models. When switching
-providers, check that the new provider's key is set. If you switch to a local model without
-setting `LOCAL_API_KEY`, the switch succeeds, but the first agent run fails.
+`switch-model.sh` updates model IDs in `settings.json` and `models.json`. It does not validate
+the provider or configure its credentials. When changing providers, check the provider and
+API settings as well as the model ID. Configure `ANTHROPIC_API_KEY` for Claude, or
+`LOCAL_API_BASE` and `LOCAL_API_KEY` for the OpenAI-compatible endpoint. Keys without an
+Anthropic workspace scope also require `ANTHROPIC_WORKSPACE_ID`; LiteLLM sends it in the
+`anthropic-workspace-id` header.
 
 ## Before the first run
 
 1. Put the tarball in `vendor/` as above.
-2. `cp .env.example .env` and fill in `LOCAL_API_BASE`, `LOCAL_API_KEY`, `USER_PASSWORD`,
-   `TG_TOKEN`, and `TG_CHAT`. If you use Anthropic, set `ANTHROPIC_API_KEY` and leave
-   `LOCAL_API_BASE` and `LOCAL_API_KEY` blank. You still need the other values. Neither a 
-   chat nor a user is configured here: groups are registered with `admin.ts`.
+2. `cp .env.example .env` and set `TG_TOKEN`. For Claude, set `ANTHROPIC_API_KEY` and
+   `ANTHROPIC_WORKSPACE_ID` if the key has no workspace scope. For a local model, set
+   `LOCAL_API_BASE` and `LOCAL_API_KEY`. Register groups with `admin.ts`.
 3. `cp models.json.example models.json` and `cp settings.json.example settings.json`, then put
-   your model id in both. Store the endpoint and API key in `.env`, where the proxy reads them.
-   The agent does not read these values. Use a placeholder key in `models.json`, never a real key.
+   the provider and model in `settings.json`. For a local model, also set its ID in `models.json`.
+   Keep the proxy URLs and placeholder keys in `models.json`; provider credentials belong in `.env`.
 4. If another process polls the same bot token, stop it first. Telegram hands each update to
    one poller, and the Channel logs a 409 until the other one is gone.
 5. Keep group privacy **on** in BotFather. The bot is then woken only by a slash command
@@ -237,11 +236,9 @@ workspace and sessions, and incur model API costs.
   handler's `post` phase, and nothing more. The reason is in `docker compose logs gateway`, as
   the error on the `Run finished` line, and in the agent container's own log while it runs:
   `docker logs $(docker ps -q --filter ancestor=keyper-concorde-agent:1.2.0)`.
-- If the model endpoint is down, every message looks like the agent is offline. Test the
-  endpoint directly with a one-word chat completion before debugging this deployment. Set
-  `BASE_URL` to `LOCAL_API_BASE` from `.env`, `API_KEY` to `LOCAL_API_KEY` from `.env`, and
-  `MODEL` to the model ID from `settings.json`. This request skips the proxy and checks whether
-  the provider itself is responding:
+- To check an OpenAI-compatible provider directly, set `BASE_URL` to `LOCAL_API_BASE` from `.env`,
+  `API_KEY` to `LOCAL_API_KEY` from `.env`, and `MODEL` to the model ID from `settings.json`.
+  This request bypasses LiteLLM and checks provider connectivity:
 
   ```sh
   curl -sS -m 60 -w '\nHTTP %{http_code} in %{time_total}s\n' \

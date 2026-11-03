@@ -15,9 +15,8 @@ services:
       retries: 20
     networks: [db]
 
-  # The deployment's image and config, holding the provider keys as production does. run.sh sets
-  # them: the real keys from .env, or for `./run.sh proxy` a dummy key and the fake Anthropic API in
-  # the runner.
+  # Use the production proxy image and config. run.sh selects real provider credentials
+  # or, in proxy mode, a dummy key and the fake Anthropic API.
   litellm:
     image: ghcr.io/berriai/litellm:v1.103.1
     command: [--config, /app/config.yaml, --port, "4000", --telemetry, "False"]
@@ -50,8 +49,8 @@ services:
       AGENT_IMAGE: keyper-behaviour-agent:local
       TURN_TIMEOUT_SECONDS: ${TURN_TIMEOUT_SECONDS:-600}
       KEYPERS: ${KEYPERS:-}
-      # Empty, like the production gateway. `./run.sh proxy` sets a dummy key here so the proxy
-      # test would see it if the agent runtime forwarded it again.
+      # Empty for behaviour scenarios. Proxy tests set a dummy key to detect
+      # accidental forwarding of provider credentials to agent containers.
       ANTHROPIC_API_KEY: ${RUNNER_PROVIDER_KEY:-}
       LOCAL_API_KEY: ${RUNNER_PROVIDER_KEY:-}
     volumes:

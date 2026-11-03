@@ -23,16 +23,16 @@ export type HarnessOptions = {
   /** Operator rooms to create. Default 2. */
   readonly keypers?: number;
   /**
-   * pi's settings, relative to the repository. Default: the deployment's settings.json.
-   * The runner reads it from /config under the same file name, so compose.behaviour.yml mounts it there.
+   * Pi settings path relative to the repository. Defaults to settings.json.
+   * Mount the file in the runner's /config directory with the same filename.
    */
   readonly settings?: string;
-  /** pi's models.json, relative to the repository. Default: the deployment's models.json. */
+  /** Model configuration path relative to the repository. Defaults to models.json. */
   readonly models?: string;
 };
 
 export type SendOptions = {
-  /** The Run must fail, rather than the scenario failing because it did. */
+  /** Require the agent run to fail. Defaults to requiring success. */
   readonly expectFailure?: boolean;
 };
 
@@ -189,7 +189,7 @@ export async function startHarness(scenario: string, options: HarnessOptions = {
     async run(prompt) {
       const name = `keyper-behaviour-${runId}-${scenario}-${++containers}`;
       container = name;
-      // The production runtime, with this scenario's paths and a name to remove it by on timeout.
+      // Use the production runtime with scenario paths and a container name for timeout cleanup.
       const pi = createAgentRuntime({
         image,
         network: "keyper_behaviour_agent",

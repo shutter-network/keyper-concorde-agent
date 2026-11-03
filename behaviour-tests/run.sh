@@ -1,9 +1,9 @@
 #!/bin/sh
 # Usage: ./run.sh [scenario|all|proxy] (default: scheduling)
 #
-# `proxy` checks the LiteLLM proxy against a fake Anthropic API with a dummy key. It does not read
-# .env and makes no model API calls. Every other choice reads the provider keys from the
-# deployment's .env through compose's own parser; only the litellm service receives them.
+# Proxy tests use a fake Anthropic API and dummy credentials, with no paid model calls.
+# Behaviour scenarios load provider credentials from the deployment's .env through Docker Compose
+# and pass them only to LiteLLM.
 set -eu
 cd "$(dirname "$0")"
 scenario="${1:-scheduling}"
@@ -13,7 +13,7 @@ if [ "$scenario" = proxy ]; then
   compose="docker compose -f compose.behaviour.yml"
   set -- behaviour-tests/proxy.test.mts
 else
-  # Send Claude models to Anthropic itself, never to an address left from a proxy run.
+  # Clear the fake upstream override for real-model tests.
   export ANTHROPIC_API_BASE=
   env_file=""
   if [ -f ../.env ]; then env_file="--env-file ../.env"; fi
@@ -24,6 +24,6 @@ else
     set -- --test-name-pattern="^${scenario}\$" behaviour-tests/scenarios.test.mts
   fi
 fi
-# A litellm left running from the other mode would keep that mode's keys, so start a fresh one.
+# Recreate LiteLLM to apply the credentials and endpoint for this test mode.
 $compose up -d --force-recreate --wait litellm
 exec $compose run --build --rm --use-aliases runner node --test "$@"

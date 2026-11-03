@@ -1,9 +1,8 @@
-// Checks the LiteLLM proxy through the harness, with the fake Anthropic API in this process and a
-// dummy key. Run with `./run.sh proxy`, which points LiteLLM at the fake; no model API is called.
+// Test LiteLLM with the shared harness, a fake Anthropic API and a dummy key.
+// Run with ./run.sh proxy. No paid model calls are made.
 //
-// The agent container is launched by the production code in gateway.ts. The runner holds the
-// dummy key under the provider variable names, so if gateway.ts forwarded them to the agent again,
-// the credential check below would fail.
+// gateway.ts launches the agent container. Dummy provider keys in the runner's environment
+// let the test detect accidental forwarding of those keys to the agent.
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
