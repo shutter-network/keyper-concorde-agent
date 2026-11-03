@@ -6,7 +6,8 @@ COPY --from=application package.json ./
 COPY --from=application vendor ./vendor
 RUN npm install --no-audit --no-fund
 
-COPY --from=application schema.ts prompt.ts ./
+COPY --from=application schema.ts prompt.ts gateway.ts ./
+COPY --from=application report ./report
 COPY --from=application telegram-channel ./telegram-channel
 COPY *.mts ./behaviour-tests/
 
